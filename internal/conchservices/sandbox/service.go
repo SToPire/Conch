@@ -17,14 +17,23 @@ import (
 )
 
 type Config struct {
-	PoolSize           int    `toml:"pool_size" json:"poolSize"`
-	DynamicReservation bool   `toml:"dynamic_reservation" json:"dynamicReservation"`
-	BridgeCount        int    `toml:"bridge_count" json:"bridgeCount"`
-	TapIP              string `toml:"tap_ip" json:"tapIP"`
-	TapMask            int    `toml:"tap_mask" json:"tapMask"`
-	VsockSignalRetry   string `toml:"vsock_signal_retry" json:"vsockSignalRetry"`
-	VsockSignalTimeout string `toml:"vsock_signal_timeout" json:"vsockSignalTimeout"`
-	RequestTimeout     string `toml:"request_timeout" json:"requestTimeout"`
+	PoolSize           int       `toml:"pool_size" json:"poolSize"`
+	DynamicReservation bool      `toml:"dynamic_reservation" json:"dynamicReservation"`
+	BridgeCount        int       `toml:"bridge_count" json:"bridgeCount"`
+	TapIP              string    `toml:"tap_ip" json:"tapIP"`
+	TapMask            int       `toml:"tap_mask" json:"tapMask"`
+	CNI                CNIConfig `toml:"cni" json:"cni"`
+	VsockSignalRetry   string    `toml:"vsock_signal_retry" json:"vsockSignalRetry"`
+	VsockSignalTimeout string    `toml:"vsock_signal_timeout" json:"vsockSignalTimeout"`
+	RequestTimeout     string    `toml:"request_timeout" json:"requestTimeout"`
+}
+
+type CNIConfig struct {
+	PluginBinDirs []string `toml:"plugin_bin_dirs" json:"pluginBinDirs"`
+	PluginConfDir string   `toml:"plugin_conf_dir" json:"pluginConfDir"`
+	PluginMaxConf int      `toml:"plugin_max_conf" json:"pluginMaxConf"`
+	IfName        string   `toml:"if_name" json:"ifName"`
+	SetupSerially bool     `toml:"setup_serially" json:"setupSerially"`
 }
 
 type Service struct {
@@ -48,7 +57,13 @@ func New(ctx context.Context, client *daemon.Client, cfg Config) (*Service, erro
 		return nil, fmt.Errorf("invalid request_timeout: %w", err)
 	}
 
-	pool, err := network.NewPool(cfg.PoolSize, cfg.DynamicReservation, cfg.BridgeCount, cfg.TapIP, cfg.TapMask)
+	pool, err := network.NewPool(cfg.PoolSize, cfg.DynamicReservation, cfg.BridgeCount, cfg.TapIP, cfg.TapMask, network.CNIManagerConfig{
+		PluginBinDirs: cfg.CNI.PluginBinDirs,
+		PluginConfDir: cfg.CNI.PluginConfDir,
+		PluginMaxConf: cfg.CNI.PluginMaxConf,
+		InterfaceName: cfg.CNI.IfName,
+		SetupSerially: cfg.CNI.SetupSerially,
+	})
 	if err != nil {
 		return nil, err
 	}

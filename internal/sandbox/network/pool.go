@@ -22,13 +22,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 
-	"github.com/coreos/go-iptables/iptables"
 	"github.com/openeuler/Conch/pkg/ulog"
-	"github.com/vishvananda/netlink"
 )
 
 const (
@@ -45,30 +42,9 @@ type Pool struct {
 	newSlots           chan *Slot
 	done               chan struct{}
 	dynamicReservation bool
+	cniManager         *CNIManager
 	inUse              map[string]*Slot
 	inUseMu            sync.Mutex
-}
-
-func initHostMasquerade() error {
-	tables, err := iptables.New()
-	if err != nil {
-		return fmt.Errorf("error initializing iptables: %w", err)
-	}
-	if err := tables.AppendUnique("nat", "POSTROUTING", "-s", vrtNetworkCIDR.String(), "-j", "MASQUERADE"); err != nil {
-		return fmt.Errorf("error creating postrouting rule: %w", err)
-	}
-	return nil
-}
-
-func deleteHostMasquerade() error {
-	tables, err := iptables.New()
-	if err != nil {
-		return fmt.Errorf("error initializing iptables: %w", err)
-	}
-	if err := tables.Delete("nat", "POSTROUTING", "-s", vrtNetworkCIDR.String(), "-j", "MASQUERADE"); err != nil {
-		return fmt.Errorf("error deleting postrouting rule: %w", err)
-	}
-	return nil
 }
 
 func normalizeAndValidatePoolSize(poolSize int) (int, error) {
@@ -84,7 +60,7 @@ func normalizeAndValidatePoolSize(poolSize int) (int, error) {
 	return poolSize, nil
 }
 
-func NewPool(poolSize int, dynamicReservation bool, bridgeCount int, tapIP string, tapMask int) (*Pool, error) {
+func NewPool(poolSize int, dynamicReservation bool, bridgeCount int, tapIP string, tapMask int, cniCfg CNIManagerConfig) (*Pool, error) {
 	if err := initConfigureBridgeLayout(bridgeCount); err != nil {
 		return nil, fmt.Errorf("invalid bridge layout: %w", err)
 	}
@@ -102,12 +78,9 @@ func NewPool(poolSize int, dynamicReservation bool, bridgeCount int, tapIP strin
 		return nil, fmt.Errorf("failed to create new storage: %w", err)
 	}
 
-	if err := initAllBridges(); err != nil {
-		return nil, fmt.Errorf("failed to init bridges: %w", err)
-	}
-	if err := initHostMasquerade(); err != nil {
-		_ = deleteAllBridges()
-		return nil, fmt.Errorf("failed to init host masquerade: %w", err)
+	cniManager, err := NewCNIManager(cniCfg)
+	if err != nil {
+		return nil, err
 	}
 
 	p := &Pool{
@@ -115,6 +88,7 @@ func NewPool(poolSize int, dynamicReservation bool, bridgeCount int, tapIP strin
 		newSlots:           newSlots,
 		done:               make(chan struct{}),
 		dynamicReservation: dynamicReservation,
+		cniManager:         cniManager,
 		inUse:              make(map[string]*Slot),
 	}
 
@@ -122,7 +96,7 @@ func NewPool(poolSize int, dynamicReservation bool, bridgeCount int, tapIP strin
 }
 
 func (p *Pool) createNetworkSlot(ctx context.Context) (*Slot, error) {
-	ips, err := p.slotStorage.Acquire(ctx)
+	slot, err := p.slotStorage.Acquire(ctx)
 	if err != nil {
 		if isExpectedShutdownError(ctx, err) {
 			return nil, context.Canceled
@@ -131,9 +105,9 @@ func (p *Pool) createNetworkSlot(ctx context.Context) (*Slot, error) {
 		return nil, fmt.Errorf("failed to acquire network slot: %w", err)
 	}
 
-	err = ips.CreateNetwork()
+	err = slot.CreateNetwork()
 	if err != nil {
-		releaseErr := p.slotStorage.Release(ips)
+		releaseErr := p.slotStorage.Release(slot)
 		err = errors.Join(err, releaseErr)
 		if isExpectedShutdownError(ctx, err) {
 			getLogger().Debug("network creation interrupted during shutdown", ulog.F("error", err))
@@ -142,7 +116,18 @@ func (p *Pool) createNetworkSlot(ctx context.Context) (*Slot, error) {
 		getLogger().Error("failed to create network", ulog.F("error", err))
 		return nil, fmt.Errorf("failed to create network: %w", err)
 	}
-	return ips, nil
+	if err := p.setupSlotNetwork(ctx, slot); err != nil {
+		teardownErr := p.teardownSlotNetwork(context.WithoutCancel(ctx), slot, true)
+		releaseErr := p.slotStorage.Release(slot)
+		err = errors.Join(err, teardownErr, releaseErr)
+		if isExpectedShutdownError(ctx, err) {
+			getLogger().Debug("network creation interrupted during shutdown", ulog.F("error", err))
+			return nil, context.Canceled
+		}
+		getLogger().Error("failed to setup slot network", ulog.F("error", err))
+		return nil, fmt.Errorf("failed to setup slot network: %w", err)
+	}
+	return slot, nil
 }
 
 func isExpectedShutdownError(ctx context.Context, err error) bool {
@@ -275,7 +260,10 @@ func (p *Pool) populateStatic(ctx context.Context) error {
 	return nil
 }
 
-func (p *Pool) Get(ctx context.Context) (*Slot, error) {
+func (p *Pool) Get(ctx context.Context, sandboxID string) (*Slot, error) {
+	if sandboxID == "" {
+		return nil, fmt.Errorf("sandboxID is required")
+	}
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -284,10 +272,45 @@ func (p *Pool) Get(ctx context.Context) (*Slot, error) {
 			return nil, fmt.Errorf("network channel has been closed")
 		}
 		if s != nil {
+			s.assignSandbox(sandboxID)
 			p.trackInUse(s)
 		}
 		return s, nil
 	}
+}
+
+func (p *Pool) setupSlotNetwork(ctx context.Context, slot *Slot) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if p == nil || p.cniManager == nil {
+		return fmt.Errorf("cni config not initialized")
+	}
+	if slot == nil {
+		return fmt.Errorf("slot is nil")
+	}
+	netnsPath := slot.NetNSPath()
+	if _, _, err := p.cniManager.SelectCNIPluginAndConfig(slot); err != nil {
+		return err
+	}
+	cniID := slot.CNIContainerID()
+	opts, err := buildCNIOpts(slot, cniID, netnsPath)
+	if err != nil {
+		return err
+	}
+
+	cniResult, err := p.cniManager.SetupPodNetwork(ctx, cniID, netnsPath, opts...)
+	if err != nil {
+		return fmt.Errorf("failed to setup cni network: %w", err)
+	}
+	slot.setSlotNetwork(cniID, cniResult, opts)
+
+	if err := SetupGuestTapNetwork(ctx, slot, netnsPath, cniResult); err != nil {
+		teardownErr := p.teardownSlotNetwork(context.WithoutCancel(ctx), slot, false)
+		return errors.Join(fmt.Errorf("failed to setup guest tap network: %w", err), teardownErr)
+	}
+
+	return nil
 }
 
 func (p *Pool) enqueueReplacement(ctx context.Context, slot *Slot) (err error) {
@@ -314,17 +337,17 @@ func (p *Pool) Release(ctx context.Context, slot *Slot) error {
 		return ctx.Err()
 	default:
 		if slot != nil {
-			slotHealthErr := slotHealth(slot)
-			if !p.dynamicReservation && slotHealthErr == nil {
+			slot.clearSandboxAssignment()
+			slotHealthErr := p.slotHealth(ctx, slot)
+			if slotHealthErr == nil {
+				p.untrackInUse(slot)
 				if err := p.enqueueReplacement(ctx, slot); err != nil {
+					p.trackInUse(slot)
 					return fmt.Errorf("failed to enqueue replenished slot: %w", err)
 				}
-				p.untrackInUse(slot)
 			} else {
-				if !p.dynamicReservation {
-					getLogger().Warn("slot unhealthy, dropping from the static pool", ulog.F("slot", slot.Key), ulog.F("error", slotHealthErr))
-				}
-				err := slot.RemoveNetwork()
+				getLogger().Warn("slot unhealthy, dropping from the pool", ulog.F("slot", slot.Key), ulog.F("error", slotHealthErr))
+				err := p.teardownSlotNetwork(ctx, slot, true)
 				if err != nil {
 					getLogger().Error("failed to remove network", ulog.F("error", err))
 					return fmt.Errorf("failed to remove network: %w", err)
@@ -339,6 +362,35 @@ func (p *Pool) Release(ctx context.Context, slot *Slot) error {
 		}
 		return nil
 	}
+}
+
+func (p *Pool) teardownSlotNetwork(ctx context.Context, slot *Slot, deleteNetNS bool) error {
+	if slot == nil {
+		return nil
+	}
+
+	var errs []error
+	netnsPath := slot.NetNSPath()
+	if slot.CNIResult() != nil {
+		if err := TeardownGuestTapNetwork(ctx, slot, netnsPath, slot.CNIResult()); err != nil {
+			errs = append(errs, err)
+		}
+		if p != nil && p.cniManager != nil {
+			if err := p.cniManager.TeardownPodNetwork(ctx, slot.CNIContainerID(), netnsPath, slot.cniOpts...); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		slot.clearSlotNetwork()
+	}
+	slot.clearSandboxAssignment()
+
+	if deleteNetNS {
+		if err := DeleteSandboxNetworkNamespace(netnsPath); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	return errors.Join(errs...)
 }
 
 func (p *Pool) trackInUse(slot *Slot) {
@@ -364,26 +416,24 @@ func (p *Pool) drainInUse() []*Slot {
 	return slots
 }
 
-func slotHealth(slot *Slot) error {
+func (p *Pool) slotHealth(ctx context.Context, slot *Slot) error {
 	if slot == nil {
 		return fmt.Errorf("slot is nil")
 	}
-	if _, err := os.Stat(filepath.Join("/var/run/netns", slot.NamespaceID())); err != nil {
+	if _, err := os.Stat(slot.NetNSPath()); err != nil {
 		return fmt.Errorf("namespace missing: %w", err)
 	}
-	veth, err := netlink.LinkByName(slot.VethName())
-	if err != nil {
-		return fmt.Errorf("veth missing: %w", err)
+	if slot.SandboxID() != "" {
+		return fmt.Errorf("slot is still assigned to sandbox %s", slot.SandboxID())
 	}
-	if veth.Attrs() == nil || veth.Attrs().MasterIndex == 0 {
-		return fmt.Errorf("veth is not attached to bridge")
+	if slot.CNIResult() == nil || slot.CNIResult().IP == "" {
+		return fmt.Errorf("slot has no cni result")
 	}
-	bridge, err := netlink.LinkByName(slot.BridgeName())
-	if err != nil {
-		return fmt.Errorf("bridge missing: %w", err)
+	if p == nil || p.cniManager == nil {
+		return fmt.Errorf("cni config not initialized")
 	}
-	if veth.Attrs().MasterIndex != bridge.Attrs().Index {
-		return fmt.Errorf("veth is attached to unexpected bridge")
+	if err := ValidateReusableSlotNetwork(ctx, slot, slot.NetNSPath(), p.cniManager.config.InterfaceName); err != nil {
+		return err
 	}
 	return nil
 }
@@ -397,7 +447,7 @@ func (p *Pool) Cleanup() error {
 			failed++
 			return
 		}
-		err := slot.RemoveNetwork()
+		err := p.teardownSlotNetwork(context.Background(), slot, true)
 		if err != nil {
 			getLogger().Error("cleanup slot failed when removing network", ulog.F("slot", slot.Key), ulog.F("category", category), ulog.F("error", err))
 			errs = append(errs, fmt.Errorf("cleanup slot %s failed, %w", slot.Key, err))
@@ -424,11 +474,5 @@ func (p *Pool) Cleanup() error {
 
 	getLogger().Info("pool cleanup summary", ulog.F("cleaned_slots", cleaned), ulog.F("failed_slots", failed))
 
-	if err := deleteHostMasquerade(); err != nil {
-		errs = append(errs, err)
-	}
-	if err := deleteAllBridges(); err != nil {
-		errs = append(errs, err)
-	}
 	return errors.Join(errs...)
 }

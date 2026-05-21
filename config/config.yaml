@@ -29,6 +29,18 @@ network:
   tap_ip: 192.168.100.2
   # CIDR mask for tap_ip
   tap_mask: 24
+  cni:
+    # CNI plugin binary search paths used for outer sandbox networking
+    plugin_bin_dirs:
+      - /opt/cni/bin
+    # CNI .conf/.conflist directory used for outer sandbox networking
+    plugin_conf_dir: /etc/cni/net.d
+    # Number of non-loopback network configs to load from plugin_conf_dir
+    plugin_max_conf: 1
+    # Outer sandbox interface name created by CNI
+    if_name: eth0
+    # Run CNI setup serially when plugin chains require strict ordering
+    setup_serially: false
 
 containerd:
   root_dir: /var/lib/conch/containerd

@@ -54,9 +54,18 @@ type SandboxConfig struct {
 	BridgeCount        int
 	TapIP              string
 	TapMask            int
+	CNI                SandboxCNIConfig
 	VsockSignalRetry   time.Duration
 	VsockSignalTimeout time.Duration
 	RequestTimeout     time.Duration
+}
+
+type SandboxCNIConfig struct {
+	PluginBinDirs []string
+	PluginConfDir string
+	PluginMaxConf int
+	IfName        string
+	SetupSerially bool
 }
 
 type Host struct {
@@ -242,11 +251,18 @@ func sandboxPluginConfig(cfg *SandboxConfig) map[string]any {
 		return nil
 	}
 	return map[string]any{
-		"pool_size":            cfg.PoolSize,
-		"dynamic_reservation":  cfg.DynamicReservation,
-		"bridge_count":         cfg.BridgeCount,
-		"tap_ip":               cfg.TapIP,
-		"tap_mask":             cfg.TapMask,
+		"pool_size":           cfg.PoolSize,
+		"dynamic_reservation": cfg.DynamicReservation,
+		"bridge_count":        cfg.BridgeCount,
+		"tap_ip":              cfg.TapIP,
+		"tap_mask":            cfg.TapMask,
+		"cni": map[string]any{
+			"plugin_bin_dirs": cfg.CNI.PluginBinDirs,
+			"plugin_conf_dir": cfg.CNI.PluginConfDir,
+			"plugin_max_conf": cfg.CNI.PluginMaxConf,
+			"if_name":         cfg.CNI.IfName,
+			"setup_serially":  cfg.CNI.SetupSerially,
+		},
 		"vsock_signal_retry":   cfg.VsockSignalRetry.String(),
 		"vsock_signal_timeout": cfg.VsockSignalTimeout.String(),
 		"request_timeout":      cfg.RequestTimeout.String(),

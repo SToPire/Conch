@@ -49,6 +49,7 @@ type Sandbox struct {
 	snapshotConf *snapshot.SnapshotConfig
 	namespace    string
 	slot         *network.Slot
+	cniResult    *network.CNIResult
 	vsockConn    net.Conn
 }
 
@@ -70,7 +71,7 @@ func ResumeSandbox(
 		}
 	}()
 
-	slot, err := pool.Get(ctx)
+	slot, err := pool.Get(ctx, sandboxId)
 	if err != nil {
 		return nil, fmt.Errorf("failed to init network: %w", err)
 	}
@@ -82,6 +83,7 @@ func ResumeSandbox(
 		}
 		return nil
 	})
+	cniResult := slot.CNIResult()
 
 	snapfilePath := snapshotConf.SnapDir()
 
@@ -118,6 +120,7 @@ func ResumeSandbox(
 		cleanup:      cleanup,
 		namespace:    namespace,
 		slot:         slot,
+		cniResult:    cniResult,
 	}
 
 	cleanup.Add(func(ctx context.Context) error {
@@ -155,7 +158,7 @@ func CreateSandbox(
 		}
 	}()
 
-	slot, err := pool.Get(ctx)
+	slot, err := pool.Get(ctx, sandboxId)
 	if err != nil {
 		return nil, fmt.Errorf("failed to init network: %w", err)
 	}
@@ -167,6 +170,7 @@ func CreateSandbox(
 		}
 		return nil
 	})
+	cniResult := slot.CNIResult()
 
 	vmmResourceArgs := &vmm.ResourceArgs{
 		CPUBoot:         vcpuNum,
@@ -201,6 +205,7 @@ func CreateSandbox(
 		cleanup:      cleanup,
 		namespace:    namespace,
 		slot:         slot,
+		cniResult:    cniResult,
 	}
 
 	cleanup.Add(func(ctx context.Context) error {

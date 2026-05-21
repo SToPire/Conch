@@ -47,11 +47,21 @@ type ServerConfig struct {
 
 // NetworkConfig holds network pool configuration
 type NetworkConfig struct {
-	PoolSize           int    `yaml:"pool_size"`
-	DynamicReservation bool   `yaml:"dynamic_reservation"`
-	BridgeCount        int    `yaml:"bridge_count"`
-	TapIP              string `yaml:"tap_ip"`
-	TapMask            int    `yaml:"tap_mask"`
+	PoolSize           int       `yaml:"pool_size"`
+	DynamicReservation bool      `yaml:"dynamic_reservation"`
+	BridgeCount        int       `yaml:"bridge_count"`
+	TapIP              string    `yaml:"tap_ip"`
+	TapMask            int       `yaml:"tap_mask"`
+	CNI                CNIConfig `yaml:"cni"`
+}
+
+// CNIConfig holds the plugin directories and runtime behavior for outer sandbox networking.
+type CNIConfig struct {
+	PluginBinDirs []string `yaml:"plugin_bin_dirs"`
+	PluginConfDir string   `yaml:"plugin_conf_dir"`
+	PluginMaxConf int      `yaml:"plugin_max_conf"`
+	IfName        string   `yaml:"if_name"`
+	SetupSerially bool     `yaml:"setup_serially"`
 }
 
 // ContainerdConfig holds containerd runtime configuration
@@ -100,6 +110,12 @@ func DefaultConfig() *Config {
 			BridgeCount:        1,
 			TapIP:              "192.168.100.2",
 			TapMask:            24,
+			CNI: CNIConfig{
+				PluginBinDirs: []string{"/opt/cni/bin"},
+				PluginConfDir: "/etc/cni/net.d",
+				PluginMaxConf: 1,
+				IfName:        "eth0",
+			},
 		},
 		Containerd: ContainerdConfig{
 			RootDir:          "/var/lib/conch/containerd",
@@ -177,6 +193,18 @@ func LoadConfig(configPath string) (*Config, error) {
 	}
 	if cfg.Network.TapMask == 0 {
 		cfg.Network.TapMask = defaultCfg.Network.TapMask
+	}
+	if len(cfg.Network.CNI.PluginBinDirs) == 0 {
+		cfg.Network.CNI.PluginBinDirs = defaultCfg.Network.CNI.PluginBinDirs
+	}
+	if cfg.Network.CNI.PluginConfDir == "" {
+		cfg.Network.CNI.PluginConfDir = defaultCfg.Network.CNI.PluginConfDir
+	}
+	if cfg.Network.CNI.PluginMaxConf == 0 {
+		cfg.Network.CNI.PluginMaxConf = defaultCfg.Network.CNI.PluginMaxConf
+	}
+	if cfg.Network.CNI.IfName == "" {
+		cfg.Network.CNI.IfName = defaultCfg.Network.CNI.IfName
 	}
 	if cfg.Containerd.RootDir == "" {
 		cfg.Containerd.RootDir = defaultCfg.Containerd.RootDir

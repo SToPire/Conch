@@ -7,6 +7,7 @@ require (
 	github.com/containerd/errdefs v1.0.0
 	github.com/containerd/platforms v1.0.0-rc.4
 	github.com/containerd/plugin v1.1.0
+	github.com/containerd/go-cni v1.1.13
 	github.com/coreos/go-iptables v0.8.0
 	github.com/erofs/erofs-container-toolkit v0.0.0-20260123120957-823f29fa15cb
 	github.com/opencontainers/go-digest v1.0.0

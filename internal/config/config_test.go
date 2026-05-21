@@ -125,7 +125,8 @@ func TestLoadConfig(t *testing.T) {
 			"server:\n  host: 127.0.0.1\n  port: 4567\n  unix_socket: \"\"\n  pid_file: /tmp/conchd.pid\n  work_dir: /tmp/conch\n" +
 			"containerd:\n  root_dir: /tmp/conch-containerd-root\n  state_dir: /tmp/conch-containerd-state\n  default_namespace: team-a\n" +
 			"image:\n  default_kernel_image: registry.example.invalid/conch/kernel:6.6.0\n" +
-			"network:\n  pool_size: 123\n  dynamic_reservation: true\n  bridge_count: 7\n  tap_ip: 192.168.100.10\n  tap_mask: 25\n",
+			"network:\n  pool_size: 123\n  dynamic_reservation: true\n  bridge_count: 7\n  tap_ip: 192.168.100.10\n  tap_mask: 25\n" +
+			"  cni:\n    plugin_bin_dirs:\n      - /custom/cni/bin\n    plugin_conf_dir: /custom/cni/net.d\n    plugin_max_conf: 2\n    if_name: net1\n    setup_serially: true\n",
 	)
 	if err := os.WriteFile(cfgPath, data, 0644); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
@@ -175,6 +176,21 @@ func TestLoadConfig(t *testing.T) {
 	if cfg.Network.TapMask != 25 {
 		t.Errorf("LoadConfig().Network.TapMask = %d, want %d", cfg.Network.TapMask, 25)
 	}
+	if len(cfg.Network.CNI.PluginBinDirs) != 1 || cfg.Network.CNI.PluginBinDirs[0] != "/custom/cni/bin" {
+		t.Errorf("LoadConfig().Network.CNI.PluginBinDirs = %v, want [/custom/cni/bin]", cfg.Network.CNI.PluginBinDirs)
+	}
+	if cfg.Network.CNI.PluginConfDir != "/custom/cni/net.d" {
+		t.Errorf("LoadConfig().Network.CNI.PluginConfDir = %q, want %q", cfg.Network.CNI.PluginConfDir, "/custom/cni/net.d")
+	}
+	if cfg.Network.CNI.PluginMaxConf != 2 {
+		t.Errorf("LoadConfig().Network.CNI.PluginMaxConf = %d, want 2", cfg.Network.CNI.PluginMaxConf)
+	}
+	if cfg.Network.CNI.IfName != "net1" {
+		t.Errorf("LoadConfig().Network.CNI.IfName = %q, want %q", cfg.Network.CNI.IfName, "net1")
+	}
+	if !cfg.Network.CNI.SetupSerially {
+		t.Errorf("LoadConfig().Network.CNI.SetupSerially = %v, want true", cfg.Network.CNI.SetupSerially)
+	}
 	if cfg.Containerd.RootDir != "/tmp/conch-containerd-root" {
 		t.Errorf("LoadConfig().Containerd.RootDir = %q, want %q", cfg.Containerd.RootDir, "/tmp/conch-containerd-root")
 	}
@@ -200,6 +216,18 @@ func TestDefaultConfigNetworkTapSettings(t *testing.T) {
 	}
 	if cfg.Network.TapMask != 24 {
 		t.Errorf("DefaultConfig().Network.TapMask = %d, want %d", cfg.Network.TapMask, 24)
+	}
+	if len(cfg.Network.CNI.PluginBinDirs) != 1 || cfg.Network.CNI.PluginBinDirs[0] != "/opt/cni/bin" {
+		t.Errorf("DefaultConfig().Network.CNI.PluginBinDirs = %v, want [/opt/cni/bin]", cfg.Network.CNI.PluginBinDirs)
+	}
+	if cfg.Network.CNI.PluginConfDir != "/etc/cni/net.d" {
+		t.Errorf("DefaultConfig().Network.CNI.PluginConfDir = %q, want %q", cfg.Network.CNI.PluginConfDir, "/etc/cni/net.d")
+	}
+	if cfg.Network.CNI.PluginMaxConf != 1 {
+		t.Errorf("DefaultConfig().Network.CNI.PluginMaxConf = %d, want 1", cfg.Network.CNI.PluginMaxConf)
+	}
+	if cfg.Network.CNI.IfName != "eth0" {
+		t.Errorf("DefaultConfig().Network.CNI.IfName = %q, want eth0", cfg.Network.CNI.IfName)
 	}
 }
 

@@ -166,6 +166,13 @@ func NewServer(cfg *config.Config) (*Server, error) {
 			BridgeCount:        cfg.Network.BridgeCount,
 			TapIP:              cfg.Network.TapIP,
 			TapMask:            cfg.Network.TapMask,
+			CNI: containerdhost.SandboxCNIConfig{
+				PluginBinDirs: cfg.Network.CNI.PluginBinDirs,
+				PluginConfDir: cfg.Network.CNI.PluginConfDir,
+				PluginMaxConf: cfg.Network.CNI.PluginMaxConf,
+				IfName:        cfg.Network.CNI.IfName,
+				SetupSerially: cfg.Network.CNI.SetupSerially,
+			},
 			VsockSignalRetry:   cfg.Sandbox.VsockSignalRetry,
 			VsockSignalTimeout: cfg.Sandbox.VsockSignalTimeout,
 			RequestTimeout:     cfg.Sandbox.RequestTimeout,
