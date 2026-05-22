@@ -471,6 +471,9 @@ func (m *Manager) Pause(req SandboxPauseRequest) (string, error) {
 func (m *Manager) CleanupPool() error {
 	logger := ulog.GetLogger()
 	logger.Debug("cleanup pool begin")
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+
 	err := m.pool.Cleanup()
 	if err != nil {
 		return fmt.Errorf("failed to cleanup pool: %v", err)

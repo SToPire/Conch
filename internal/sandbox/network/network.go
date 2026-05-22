@@ -74,11 +74,11 @@ func runInNetNSPath(netnsPath string, fn func() error) (retErr error) {
 	return fn()
 }
 
-func CreateSandboxNetworkNamespace(slot *Slot) (string, error) {
+func CreateSandboxNetworkNamespace(slot *Slot) (netnsPath string, retErr error) {
 	if slot == nil {
 		return "", fmt.Errorf("slot is nil")
 	}
-	netnsPath := slot.NetNSPath()
+	netnsPath = slot.NetNSPath()
 	if _, err := os.Stat(netnsPath); err == nil {
 		return netnsPath, nil
 	} else if err != nil && !os.IsNotExist(err) {
@@ -94,10 +94,10 @@ func CreateSandboxNetworkNamespace(slot *Slot) (string, error) {
 	}
 	defer func() {
 		if err := netns.Set(hostNS); err != nil {
-			fmt.Errorf("error resetting network namespace back to the host namespace, %w", err)
+			retErr = errors.Join(retErr, fmt.Errorf("error resetting network namespace back to the host namespace: %w", err))
 		}
 		if err := hostNS.Close(); err != nil {
-			fmt.Errorf("error closing host network namespace, %w", err)
+			retErr = errors.Join(retErr, fmt.Errorf("error closing host network namespace: %w", err))
 		}
 	}()
 
@@ -128,7 +128,7 @@ func DeleteSandboxNetworkNamespace(netnsPath string) error {
 func (s *Slot) CreateNetwork() error {
 	netnsPath, err := CreateSandboxNetworkNamespace(s)
 	if err != nil {
-		return err
+		return fmt.Errorf("create network namespace for slot index %d: %w", s.Idx, err)
 	}
 	s.setNetNSPath(netnsPath)
 	return nil
@@ -239,10 +239,10 @@ func (s *Slot) teardownGuestTapNetwork(cniResult *CNIResult) error {
 		if err != nil {
 			errs = append(errs, fmt.Errorf("error initializing iptables: %w", err))
 		} else {
-			if err := tables.Delete("nat", "POSTROUTING", "-s", s.NamespaceIP(), "-j", "SNAT", "--to", cniResult.IP); err != nil {
+			if err := tables.DeleteIfExists("nat", "POSTROUTING", "-s", s.NamespaceIP(), "-j", "SNAT", "--to", cniResult.IP); err != nil {
 				errs = append(errs, fmt.Errorf("error deleting postrouting rule to guest tap: %w", err))
 			}
-			if err := tables.Delete("nat", "PREROUTING", "-d", cniResult.IP, "-j", "DNAT", "--to-destination", s.NamespaceIP()); err != nil {
+			if err := tables.DeleteIfExists("nat", "PREROUTING", "-d", cniResult.IP, "-j", "DNAT", "--to-destination", s.NamespaceIP()); err != nil {
 				errs = append(errs, fmt.Errorf("error deleting prerouting rule to guest tap: %w", err))
 			}
 		}
@@ -253,8 +253,11 @@ func (s *Slot) teardownGuestTapNetwork(cniResult *CNIResult) error {
 		if err := netlink.LinkDel(tap); err != nil {
 			errs = append(errs, fmt.Errorf("error deleting tap device: %w", err))
 		}
-	} else if !os.IsNotExist(err) {
-		errs = append(errs, fmt.Errorf("error finding tap device: %w", err))
+	} else {
+		var linkNotFound netlink.LinkNotFoundError
+		if !errors.As(err, &linkNotFound) && !os.IsNotExist(err) {
+			errs = append(errs, fmt.Errorf("error finding tap device: %w", err))
+		}
 	}
 
 	return errors.Join(errs...)

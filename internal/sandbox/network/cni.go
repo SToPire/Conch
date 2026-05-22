@@ -2,9 +2,11 @@ package network
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
+	"time"
 
 	cni "github.com/containerd/go-cni"
 )
@@ -15,6 +17,8 @@ const (
 	defaultCNIPluginConfDir   = "/etc/cni/net.d"
 	defaultCNIPluginBinDir    = "/opt/cni/bin"
 	defaultCNIPluginMaxConf   = 1
+	cniTeardownRetryAttempts  = 3
+	cniTeardownRetryDelay     = 100 * time.Millisecond
 )
 
 type NamespaceOpts = cni.NamespaceOpts
@@ -123,10 +127,22 @@ func interfacePrefix(ifName string) string {
 
 func selectedCNIConfigName(plugin cni.CNI) string {
 	config := plugin.GetConfig()
-	if config == nil || len(config.Networks) == 0 || config.Networks[0] == nil || config.Networks[0].Config == nil {
+	if config == nil || len(config.Networks) == 0 {
 		return ""
 	}
-	return config.Networks[0].Config.Name
+	for _, network := range config.Networks {
+		if network == nil || network.Config == nil {
+			continue
+		}
+		name := network.Config.Name
+		switch strings.ToLower(name) {
+		case "", "lo", "loopback", "cni-loopback":
+			continue
+		default:
+			return name
+		}
+	}
+	return ""
 }
 
 func (m *CNIManager) SelectCNIPluginAndConfig(slot *Slot) (cni.CNI, string, error) {
@@ -180,7 +196,18 @@ func (m *CNIManager) SetupPodNetwork(ctx context.Context, cniID string, netnsPat
 	if err != nil {
 		return nil, err
 	}
-	return convertCNIResult(result, m.config.InterfaceName)
+	converted, err := convertCNIResult(result, m.config.InterfaceName)
+	if err != nil {
+		removeErr := m.plugin.Remove(context.WithoutCancel(ctx), cniID, netnsPath, opts...)
+		if removeErr != nil {
+			return nil, errors.Join(
+				fmt.Errorf("failed to convert cni result: %w", err),
+				fmt.Errorf("failed to rollback cni setup: %w", removeErr),
+			)
+		}
+		return nil, fmt.Errorf("failed to convert cni result after rolling back cni setup: %w", err)
+	}
+	return converted, nil
 }
 
 func (m *CNIManager) TeardownPodNetwork(ctx context.Context, cniID string, netnsPath string, opts ...NamespaceOpts) error {
