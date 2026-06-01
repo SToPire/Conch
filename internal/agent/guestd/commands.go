@@ -67,9 +67,10 @@ func (c *commandPath) available() bool {
 }
 
 var (
-	mountCommand  = newCommandPath("mount", "/bin/mount", "/usr/bin/mount", "/sbin/mount", "/usr/sbin/mount")
-	chrootCommand = newCommandPath("chroot", "/usr/sbin/chroot", "/usr/bin/chroot", "/bin/chroot")
-	ipCommand     = newCommandPath("ip", "/sbin/ip", "/usr/sbin/ip", "/usr/bin/ip", "/bin/ip")
+	mountCommand    = newCommandPath("mount", "/bin/mount", "/usr/bin/mount", "/sbin/mount", "/usr/sbin/mount")
+	chrootCommand   = newCommandPath("chroot", "/usr/sbin/chroot", "/usr/bin/chroot", "/bin/chroot")
+	ipCommand       = newCommandPath("ip", "/sbin/ip", "/usr/sbin/ip", "/usr/bin/ip", "/bin/ip")
+	modprobeCommand = newCommandPath("modprobe", "/sbin/modprobe", "/usr/sbin/modprobe", "/bin/modprobe", "/usr/bin/modprobe")
 )
 
 func execMount(args ...string) *exec.Cmd {
@@ -82,6 +83,10 @@ func execChroot(args ...string) *exec.Cmd {
 
 func execIP(args ...string) *exec.Cmd {
 	return exec.Command(ipCommand.get(), args...)
+}
+
+func execModprobe(args ...string) *exec.Cmd {
+	return exec.Command(modprobeCommand.get(), args...)
 }
 
 func isMountPoint(target string) bool {

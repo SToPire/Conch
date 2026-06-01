@@ -75,6 +75,7 @@ func runAsInit() {
 
 	createDevNull()
 	mountEssentialFilesystems()
+	loadKernelModules("virtio_net", "vsock", "vmw_vsock_virtio_transport")
 	setupInitFileLogging()
 	mountStorageDevices()
 	setupNetwork()
