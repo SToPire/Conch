@@ -16,7 +16,7 @@ import (
 
 func TestHandleCreateSandboxReturnsGeneratedSandboxID(t *testing.T) {
 	sandboxOps := &fakeSandboxOps{}
-	runtimeService := conchruntime.New(sandboxOps, nil, nil, nil, "default")
+	runtimeService := conchruntime.New(sandboxOps, nil, nil, nil)
 	server := &Daemon{router: http.NewServeMux(), runtimeService: runtimeService}
 	server.routes()
 
@@ -36,6 +36,31 @@ func TestHandleCreateSandboxReturnsGeneratedSandboxID(t *testing.T) {
 	}
 }
 
+func TestHandleCreateSandboxReturnsConflictForExistingID(t *testing.T) {
+	store, err := state.OpenBolt(t.TempDir() + "/state.db")
+	if err != nil {
+		t.Fatalf("OpenBolt() error = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.UpsertSandbox(context.Background(), state.SandboxRecord{
+		SandboxID:                     "sandbox-1",
+		CheckpointHeadTemplateID:      "tmpl-existing",
+		CheckpointHeadBootIndexDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}); err != nil {
+		t.Fatalf("UpsertSandbox() seed error = %v", err)
+	}
+
+	runtimeService := conchruntime.New(&fakeSandboxOps{}, nil, nil, store)
+	server := &Daemon{router: http.NewServeMux(), runtimeService: runtimeService}
+	server.routes()
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", bytes.NewBufferString(`{"sandbox_id":"sandbox-1","template_id":"tmpl-new"}`))
+	server.router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d; body = %s", recorder.Code, http.StatusConflict, recorder.Body.String())
+	}
+}
+
 func TestHandleCheckpointSandboxReturnsBootIndexDigest(t *testing.T) {
 	const (
 		sourceDigest     = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -52,7 +77,6 @@ func TestHandleCheckpointSandboxReturnsBootIndexDigest(t *testing.T) {
 	if err := store.CreateTemplate(ctx, conchtemplate.Entry{
 		ID:              "tmpl-source",
 		Origin:          conchtemplate.OriginImage,
-		Namespace:       "default",
 		BootIndexDigest: sourceDigest,
 		BootMode:        conchtemplate.BootModeCold,
 	}); err != nil {
@@ -60,7 +84,6 @@ func TestHandleCheckpointSandboxReturnsBootIndexDigest(t *testing.T) {
 	}
 	if err := store.UpsertSandbox(ctx, state.SandboxRecord{
 		SandboxID:                     "sandbox-1",
-		Namespace:                     "default",
 		CheckpointHeadTemplateID:      "tmpl-source",
 		CheckpointHeadBootIndexDigest: sourceDigest,
 	}); err != nil {
@@ -72,7 +95,7 @@ func TestHandleCheckpointSandboxReturnsBootIndexDigest(t *testing.T) {
 		BootIndexDigest: checkpointDigest,
 		ImageName:       "localhost/conch/template:checkpoint",
 	}}
-	runtimeService := conchruntime.New(sandboxOps, imageOps, imageOps, store, "default")
+	runtimeService := conchruntime.New(sandboxOps, imageOps, imageOps, store)
 	server := &Daemon{router: http.NewServeMux(), runtimeService: runtimeService}
 	server.routes()
 

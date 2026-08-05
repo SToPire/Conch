@@ -55,3 +55,4 @@ def test_build_create_payload_without_vmm_name_uses_server_default(monkeypatch):
 
     payload = sbx._build_create_payload()
     assert payload[VMM_NAME_KEY] == ""
+    assert "namespace" not in payload

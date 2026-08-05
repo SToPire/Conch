@@ -44,15 +44,14 @@ const (
 	defaultHTTPTimeout = 120 * time.Second
 )
 
-// ResolveBaseURL returns conchd base URL: CONCH_API_URL, or http://CONCHD_HOST:CONCHD_PORT (default port 4063), or DefaultConchAPIURL.
-func ResolveBaseURL() string {
-	baseURL, _ := resolveClientTransport("", "", 0)
-	return baseURL
+// ResolveBaseURL returns the configured conchd base URL or a configuration error.
+func ResolveBaseURL() (string, error) {
+	baseURL, _, err := resolveClientTransport("", "", 0)
+	return baseURL, err
 }
 
 // CreateRequest matches POST /api/v1/sandboxes.
 type CreateRequest struct {
-	Namespace    string        `json:"namespace,omitempty"`
 	TemplateID   string        `json:"template_id"`
 	VmmName      string        `json:"vmm_name"`
 	SandboxId    string        `json:"sandbox_id"`
@@ -74,12 +73,10 @@ type CreateResponse struct {
 }
 
 type SandboxLifecycleRequest struct {
-	Namespace string `json:"namespace,omitempty"`
 	SandboxId string `json:"sandbox_id"`
 }
 
 type SandboxCheckpointRequest struct {
-	Namespace string            `json:"namespace,omitempty"`
 	SandboxId string            `json:"sandbox_id"`
 	Labels    map[string]string `json:"labels,omitempty"`
 }
@@ -94,9 +91,8 @@ type TemplateIDRequest struct {
 }
 
 type TemplateListRequest struct {
-	Namespace string `json:"namespace,omitempty"`
-	Origin    string `json:"origin,omitempty"`
-	BootMode  string `json:"boot_mode,omitempty"`
+	Origin   string `json:"origin,omitempty"`
+	BootMode string `json:"boot_mode,omitempty"`
 }
 
 type TemplateRecord struct {
@@ -104,7 +100,6 @@ type TemplateRecord struct {
 	Origin           string            `json:"origin"`
 	BootMode         string            `json:"boot_mode"`
 	BootIndexDigest  string            `json:"boot_index_digest,omitempty"`
-	Namespace        string            `json:"namespace"`
 	ParentTemplateID string            `json:"parent_template_id,omitempty"`
 	SourceSandboxID  string            `json:"source_sandbox_id,omitempty"`
 	ImageName        string            `json:"image_name,omitempty"`
@@ -119,7 +114,6 @@ type TemplateListResponse struct {
 
 type TemplatePullRequest struct {
 	Reference string            `json:"reference"`
-	Namespace string            `json:"namespace,omitempty"`
 	PlainHTTP bool              `json:"plain_http,omitempty"`
 	Username  string            `json:"username,omitempty"`
 	Password  string            `json:"password,omitempty"`
@@ -136,7 +130,6 @@ type TemplatePullResponse struct {
 type TemplatePushRequest struct {
 	TemplateID      string `json:"template_id"`
 	RemoteReference string `json:"remote_reference"`
-	Namespace       string `json:"namespace,omitempty"`
 	PlainHTTP       bool   `json:"plain_http,omitempty"`
 	Username        string `json:"username,omitempty"`
 	Password        string `json:"password,omitempty"`
@@ -146,7 +139,6 @@ type TemplatePushRequest struct {
 // PullImageRequest matches POST /api/image/pull.
 type PullImageRequest struct {
 	ImageName  string `json:"image_name"`
-	Namespace  string `json:"namespace,omitempty"`
 	PlainHTTP  bool   `json:"plain_http,omitempty"`
 	Username   string `json:"username,omitempty"`
 	Password   string `json:"password,omitempty"`
@@ -156,7 +148,6 @@ type PullImageRequest struct {
 // UnpackImageRequest matches POST /api/image/unpack.
 type UnpackImageRequest struct {
 	ImageName string `json:"image_name"`
-	Namespace string `json:"namespace,omitempty"`
 }
 
 type ImageResponse struct {
@@ -164,8 +155,7 @@ type ImageResponse struct {
 }
 
 type ListImagesRequest struct {
-	Namespace string   `json:"namespace,omitempty"`
-	Filters   []string `json:"filters,omitempty"`
+	Filters []string `json:"filters,omitempty"`
 }
 
 type ImageRecord struct {
@@ -185,7 +175,6 @@ type ListImagesResponse struct {
 
 type RemoveImageRequest struct {
 	ImageName   string `json:"image_name"`
-	Namespace   string `json:"namespace,omitempty"`
 	Synchronous bool   `json:"synchronous,omitempty"`
 }
 
@@ -194,7 +183,6 @@ type TemplateCreateRequest struct {
 	KernelPath   string
 	InitrdPath   string
 	BootIndexTag string
-	Namespace    string
 	PlainHTTP    bool
 	Username     string
 	Password     string
@@ -203,7 +191,6 @@ type TemplateCreateRequest struct {
 
 type TemplateCreateMetadata struct {
 	Source       string            `json:"source"`
-	Namespace    string            `json:"namespace,omitempty"`
 	BootIndexTag string            `json:"boot_index_tag,omitempty"`
 	PlainHTTP    bool              `json:"plain_http,omitempty"`
 	Username     string            `json:"username,omitempty"`
@@ -219,8 +206,7 @@ type TemplateCreateResponse struct {
 }
 
 type ListSnapshotsRequest struct {
-	Namespace string   `json:"namespace,omitempty"`
-	Filters   []string `json:"filters,omitempty"`
+	Filters []string `json:"filters,omitempty"`
 }
 
 type SnapshotRecord struct {
@@ -238,8 +224,7 @@ type ListSnapshotsResponse struct {
 }
 
 type RemoveSnapshotRequest struct {
-	Key       string `json:"key"`
-	Namespace string `json:"namespace,omitempty"`
+	Key string `json:"key"`
 }
 
 // Client communicates with Conch conchd HTTP API
@@ -248,74 +233,83 @@ type Client struct {
 	httpClient *http.Client
 }
 
-// NewClient creates a Conch API client. baseURL defaults to DefaultConchAPIURL if empty.
-func NewClient(baseURL string) *Client {
+// NewClient creates a Conch API client. baseURL defaults to the configured endpoint if empty.
+func NewClient(baseURL string) (*Client, error) {
 	return NewClientWithConfig(baseURL, "")
 }
 
-// NewClientWithConfig creates a Conch API client using configPath when baseURL is empty.
-func NewClientWithConfig(baseURL, configPath string) *Client {
-	resolvedURL, httpClient := resolveClientTransport(baseURL, configPath, 0)
+// NewClientWithConfig creates a Conch API client, validates the selected config,
+// and uses configuration-based endpoint discovery when baseURL is empty.
+func NewClientWithConfig(baseURL, configPath string) (*Client, error) {
+	resolvedURL, httpClient, err := resolveClientTransport(baseURL, configPath, 0)
+	if err != nil {
+		return nil, err
+	}
 	return &Client{
 		baseURL:    resolvedURL,
 		httpClient: httpClient,
-	}
+	}, nil
 }
 
 // NewClientWithConfigAndTimeout creates a Conch API client with an optional
 // per-call HTTP timeout override.
-func NewClientWithConfigAndTimeout(baseURL, configPath string, timeoutOverride time.Duration) *Client {
-	resolvedURL, httpClient := resolveClientTransport(baseURL, configPath, timeoutOverride)
+func NewClientWithConfigAndTimeout(baseURL, configPath string, timeoutOverride time.Duration) (*Client, error) {
+	resolvedURL, httpClient, err := resolveClientTransport(baseURL, configPath, timeoutOverride)
+	if err != nil {
+		return nil, err
+	}
 	return &Client{
 		baseURL:    resolvedURL,
 		httpClient: httpClient,
-	}
+	}, nil
 }
 
-func resolveClientTransport(baseURL, configPath string, timeoutOverride time.Duration) (string, *http.Client) {
+func resolveClientTransport(baseURL, configPath string, timeoutOverride time.Duration) (string, *http.Client, error) {
 	timeout := timeoutOverride
 	if timeout <= 0 {
 		timeout = resolveHTTPTimeout()
-	}
-	if strings.TrimSpace(baseURL) != "" {
-		return baseURL, &http.Client{Timeout: timeout}
-	}
-
-	if u := strings.TrimSpace(os.Getenv("CONCH_API_URL")); u != "" {
-		return u, &http.Client{Timeout: timeout}
 	}
 
 	cfgPath := configPath
 	if cfgPath == "" {
 		cfgPath = config.FindConfigFile()
 	}
-	if cfg, err := config.LoadConfig(cfgPath); err == nil {
-		if unixSocket := strings.TrimSpace(cfg.GetServerUnixSocket()); unixSocket != "" {
-			return defaultUnixAPIURL, newUnixSocketHTTPClient(unixSocket, timeout)
-		}
-		host := strings.TrimSpace(cfg.Server.Host)
-		port := cfg.Server.Port
-		if host != "" && port > 0 {
-			return fmt.Sprintf("http://%s:%d", host, port), &http.Client{Timeout: timeout}
-		}
+	cfg, err := config.LoadConfig(cfgPath)
+	if err != nil {
+		return "", nil, fmt.Errorf("load config %q: %w", cfgPath, err)
+	}
+	if strings.TrimSpace(baseURL) != "" {
+		return baseURL, &http.Client{Timeout: timeout}, nil
 	}
 
-	host := strings.TrimSpace(os.Getenv("CONCHD_HOST"))
-	port := strings.TrimSpace(os.Getenv("CONCHD_PORT"))
+	if u := strings.TrimSpace(os.Getenv("CONCH_API_URL")); u != "" {
+		return u, &http.Client{Timeout: timeout}, nil
+	}
+
+	if unixSocket := strings.TrimSpace(cfg.GetServerUnixSocket()); unixSocket != "" {
+		return defaultUnixAPIURL, newUnixSocketHTTPClient(unixSocket, timeout), nil
+	}
+	host := strings.TrimSpace(cfg.Server.Host)
+	port := cfg.Server.Port
+	if host != "" && port > 0 {
+		return fmt.Sprintf("http://%s:%d", host, port), &http.Client{Timeout: timeout}, nil
+	}
+
+	host = strings.TrimSpace(os.Getenv("CONCHD_HOST"))
+	portString := strings.TrimSpace(os.Getenv("CONCHD_PORT"))
 	if host != "" {
-		if port == "" {
-			port = "4063"
+		if portString == "" {
+			portString = "4063"
 		}
-		return fmt.Sprintf("http://%s:%s", host, port), &http.Client{Timeout: timeout}
+		return fmt.Sprintf("http://%s:%s", host, portString), &http.Client{Timeout: timeout}, nil
 	}
 
-	return DefaultConchAPIURL, &http.Client{Timeout: timeout}
+	return DefaultConchAPIURL, &http.Client{Timeout: timeout}, nil
 }
 
 type PushImageRequest struct {
 	LocalImage      string `json:"local_image"`
 	RemoteImage     string `json:"remote_image"`
-	Namespace       string `json:"namespace,omitempty"`
 	PlainHTTP       bool   `json:"plain_http,omitempty"`
 	Username        string `json:"username,omitempty"`
 	Password        string `json:"password,omitempty"`
@@ -348,12 +342,11 @@ func newUnixSocketHTTPClient(socketPath string, timeout time.Duration) *http.Cli
 }
 
 // CreateSandbox calls POST /api/v1/sandboxes using a template ID.
-func (c *Client) CreateSandbox(templateID, sandboxID, namespace string, ramMB int64) error {
+func (c *Client) CreateSandbox(templateID, sandboxID string, ramMB int64) error {
 	if ramMB <= 0 {
 		ramMB = defaultRamMB
 	}
 	req := CreateRequest{
-		Namespace:  strings.TrimSpace(namespace),
 		TemplateID: templateID,
 		SandboxId:  sandboxID,
 		VmmName:    defaultVmmName,
@@ -380,19 +373,19 @@ func (c *Client) CreateSandbox(templateID, sandboxID, namespace string, ramMB in
 	return nil
 }
 
-func (c *Client) SuspendSandbox(ctx context.Context, sandboxID, namespace string) error {
+func (c *Client) SuspendSandbox(ctx context.Context, sandboxID string) error {
 	var resp map[string]string
-	return c.postJSON(ctx, suspendSandbox, SandboxLifecycleRequest{Namespace: strings.TrimSpace(namespace), SandboxId: sandboxID}, &resp)
+	return c.postJSON(ctx, suspendSandbox, SandboxLifecycleRequest{SandboxId: sandboxID}, &resp)
 }
 
-func (c *Client) ResumeSandbox(ctx context.Context, sandboxID, namespace string) error {
+func (c *Client) ResumeSandbox(ctx context.Context, sandboxID string) error {
 	var resp map[string]string
-	return c.postJSON(ctx, resumeSandbox, SandboxLifecycleRequest{Namespace: strings.TrimSpace(namespace), SandboxId: sandboxID}, &resp)
+	return c.postJSON(ctx, resumeSandbox, SandboxLifecycleRequest{SandboxId: sandboxID}, &resp)
 }
 
-func (c *Client) CheckpointSandbox(ctx context.Context, sandboxID, namespace string) (string, error) {
+func (c *Client) CheckpointSandbox(ctx context.Context, sandboxID string) (string, error) {
 	var resp SandboxCheckpointResponse
-	if err := c.postJSON(ctx, checkpointSandbox, SandboxCheckpointRequest{Namespace: strings.TrimSpace(namespace), SandboxId: sandboxID}, &resp); err != nil {
+	if err := c.postJSON(ctx, checkpointSandbox, SandboxCheckpointRequest{SandboxId: sandboxID}, &resp); err != nil {
 		return "", err
 	}
 	if resp.Status != "ok" {
@@ -403,7 +396,6 @@ func (c *Client) CheckpointSandbox(ctx context.Context, sandboxID, namespace str
 
 func (c *Client) ListTemplates(ctx context.Context, req TemplateListRequest) ([]TemplateRecord, error) {
 	var resp TemplateListResponse
-	req.Namespace = strings.TrimSpace(req.Namespace)
 	req.Origin = strings.TrimSpace(req.Origin)
 	req.BootMode = strings.TrimSpace(req.BootMode)
 	if err := c.postJSON(ctx, listTemplates, req, &resp); err != nil {
@@ -477,7 +469,6 @@ func (c *Client) UnpackImage(ctx context.Context, req UnpackImageRequest) (map[s
 func (c *Client) CreateTemplate(ctx context.Context, req TemplateCreateRequest) (TemplateCreateResponse, error) {
 	metadata, err := json.Marshal(TemplateCreateMetadata{
 		Source:       req.Source,
-		Namespace:    req.Namespace,
 		BootIndexTag: req.BootIndexTag,
 		PlainHTTP:    req.PlainHTTP,
 		Username:     req.Username,
