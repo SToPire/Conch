@@ -228,7 +228,7 @@ func TestTemplateAndSnapshotDebugAPIMethods(t *testing.T) {
 				Status:          "ok",
 				TemplateID:      "tmpl_123",
 				BootIndexDigest: "sha256:template",
-				BootIndexTag:    "localhost/conch/template:latest",
+				BuildRef:        "localhost/conch/template:sha256-template",
 			})
 		case listSnapshots:
 			if err := json.NewDecoder(r.Body).Decode(&listSnapshotsReq); err != nil {
@@ -252,19 +252,18 @@ func TestTemplateAndSnapshotDebugAPIMethods(t *testing.T) {
 
 	c := newTestClient(t, Options{BaseURL: server.URL})
 	templateResp, err := c.CreateTemplate(context.Background(), TemplateCreateRequest{
-		Source:       "docker.io/library/busybox:latest",
-		KernelPath:   kernel.Name(),
-		InitrdPath:   initrd.Name(),
-		BootIndexTag: "localhost/conch/template:latest",
-		PlainHTTP:    true,
-		Username:     "user",
-		Password:     "pass",
-		Labels:       map[string]string{"role": "base"},
+		Source:     "docker.io/library/busybox:latest",
+		KernelPath: kernel.Name(),
+		InitrdPath: initrd.Name(),
+		PlainHTTP:  true,
+		Username:   "user",
+		Password:   "pass",
+		Labels:     map[string]string{"role": "base"},
 	})
 	if err != nil {
 		t.Fatalf("CreateTemplate: %v", err)
 	}
-	if templateMetadata.Source != "docker.io/library/busybox:latest" || templateMetadata.BootIndexTag != "localhost/conch/template:latest" || !templateMetadata.PlainHTTP || templateMetadata.Labels["role"] != "base" {
+	if templateMetadata.Source != "docker.io/library/busybox:latest" || !templateMetadata.PlainHTTP || templateMetadata.Labels["role"] != "base" {
 		t.Fatalf("template metadata = %#v", templateMetadata)
 	}
 	if templateKernelBody != "kernel-content" || templateInitrdBody != "initrd-content" {
@@ -357,6 +356,8 @@ func TestTemplateDistributionAPIMethods(t *testing.T) {
 	var pullReq TemplatePullRequest
 	var pushReq TemplatePushRequest
 	var unpackReq TemplateUnpackRequest
+	const templateDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const canonicalRef = "localhost/conch/template:sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case pullTemplate:
@@ -365,9 +366,9 @@ func TestTemplateDistributionAPIMethods(t *testing.T) {
 			}
 			_ = json.NewEncoder(w).Encode(TemplatePullResponse{
 				Status:          "ok",
-				TemplateID:      "tmpl_pulled",
-				BootIndexDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-				BuildRef:        pullReq.Reference,
+				TemplateID:      templateDigest,
+				BootIndexDigest: templateDigest,
+				BuildRef:        canonicalRef,
 			})
 		case pushTemplate:
 			if err := json.NewDecoder(r.Body).Decode(&pushReq); err != nil {
@@ -396,7 +397,7 @@ func TestTemplateDistributionAPIMethods(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PullTemplate() error = %v", err)
 	}
-	if pulled.TemplateID != "tmpl_pulled" || pulled.BuildRef != pullReq.Reference || !pullReq.PlainHTTP {
+	if pulled.TemplateID != templateDigest || pulled.BuildRef != canonicalRef || !pullReq.PlainHTTP {
 		t.Fatalf("PullTemplate() response = %#v, request = %#v", pulled, pullReq)
 	}
 
@@ -409,14 +410,14 @@ func TestTemplateDistributionAPIMethods(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("PushTemplate() error = %v", err)
 	}
-	if pushReq.TemplateID != "tmpl_pulled" || pushReq.RemoteReference != "mirror.example.invalid/conch/template:copy" || !pushReq.PlainHTTP {
+	if pushReq.TemplateID != templateDigest || pushReq.RemoteReference != "mirror.example.invalid/conch/template:copy" || !pushReq.PlainHTTP {
 		t.Fatalf("PushTemplate() request = %#v", pushReq)
 	}
 
 	if err := c.UnpackTemplate(context.Background(), TemplateUnpackRequest{TemplateID: pulled.TemplateID}); err != nil {
 		t.Fatalf("UnpackTemplate() error = %v", err)
 	}
-	if unpackReq.TemplateID != "tmpl_pulled" {
+	if unpackReq.TemplateID != templateDigest {
 		t.Fatalf("UnpackTemplate() request = %#v", unpackReq)
 	}
 }

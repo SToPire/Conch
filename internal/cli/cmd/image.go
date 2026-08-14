@@ -32,7 +32,7 @@ func printImageHelp(out io.Writer) {
 	fmt.Fprintln(out, "  pull    Pull an image into the local content store.")
 	fmt.Fprintln(out, "  push    Push an image to a registry.")
 	fmt.Fprintln(out, "  ls      List images from conchd/containerd.")
-	fmt.Fprintln(out, "  rm      Remove an image from conchd/containerd.")
+	fmt.Fprintln(out, "  rm      Remove an OCI image or an unowned Boot Index.")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Run 'conch image <command> --help' for command-specific usage.")
 }
@@ -69,7 +69,7 @@ func runImageList(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("image ls", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	configPath := fs.String("config", "", "config file path")
-	showAll := fs.Bool("all", false, "show internal containerd image records")
+	showAll := fs.Bool("all", false, "show internal image records (not content, snapshots, leases, or disk usage)")
 	var filters stringSliceFlag
 	fs.Var(&filters, "filter", "containerd image filter")
 	if err := fs.Parse(args); err != nil {

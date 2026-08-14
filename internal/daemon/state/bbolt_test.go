@@ -106,13 +106,13 @@ func TestBoltStoreTemplateCRUD(t *testing.T) {
 	defer store.Close()
 
 	ctx := context.Background()
+	templateDigest := digest.FromString("template-1").String()
 	rec := conchtemplate.Entry{
-		ID:              "tmpl_1",
-		Origin:          conchtemplate.OriginImage,
-		BootMode:        conchtemplate.BootModeCold,
-		BootIndexDigest: digest.FromString("template-1").String(),
-		Labels:          map[string]string{"purpose": "test"},
-		CreatedAt:       1,
+		ID:        templateDigest,
+		Origin:    conchtemplate.OriginImage,
+		BootMode:  conchtemplate.BootModeCold,
+		Labels:    map[string]string{"purpose": "test"},
+		CreatedAt: 1,
 	}
 	if err := store.CreateTemplate(ctx, rec); err != nil {
 		t.Fatalf("CreateTemplate() error = %v", err)
@@ -126,7 +126,7 @@ func TestBoltStoreTemplateCRUD(t *testing.T) {
 	}
 
 	duplicate := rec
-	duplicate.BootIndexDigest = digest.FromString("replacement").String()
+	duplicate.Labels = map[string]string{"purpose": "replacement"}
 	if err := store.CreateTemplate(ctx, duplicate); !errors.Is(err, conchtemplate.ErrAlreadyExists) {
 		t.Fatalf("CreateTemplate(duplicate) error = %v, want ErrAlreadyExists", err)
 	}
@@ -134,8 +134,8 @@ func TestBoltStoreTemplateCRUD(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetTemplate() after duplicate error = %v", err)
 	}
-	if got.BootIndexDigest != rec.BootIndexDigest {
-		t.Fatalf("duplicate CreateTemplate overwrote digest: got %q, want %q", got.BootIndexDigest, rec.BootIndexDigest)
+	if got.Labels["purpose"] != "test" {
+		t.Fatalf("duplicate CreateTemplate overwrote entry: %#v", got)
 	}
 	items, err := store.ListTemplates(ctx)
 	if err != nil {
@@ -170,20 +170,19 @@ func TestBoltStorePublishCheckpointAdvancesHeadAtomically(t *testing.T) {
 	}
 
 	if err := store.PublishCheckpoint(ctx, conchtemplate.Entry{
-		ID:               "t1",
+		ID:               checkpointDigest,
 		Origin:           conchtemplate.OriginCheckpoint,
 		BootMode:         conchtemplate.BootModeResume,
-		BootIndexDigest:  checkpointDigest,
 		ParentTemplateID: "t0",
 		SourceSandboxID:  "sb-1",
 	}); err != nil {
 		t.Fatalf("PublishCheckpoint() error = %v", err)
 	}
-	templateRecord, err := store.GetTemplate(ctx, "t1")
+	templateRecord, err := store.GetTemplate(ctx, checkpointDigest)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if templateRecord.BootIndexDigest != checkpointDigest ||
+	if templateRecord.ID != checkpointDigest ||
 		templateRecord.Origin != conchtemplate.OriginCheckpoint ||
 		templateRecord.BootMode != conchtemplate.BootModeResume {
 		t.Fatalf("published template = %#v", templateRecord)
@@ -192,7 +191,7 @@ func TestBoltStorePublishCheckpointAdvancesHeadAtomically(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sandboxRecord.CheckpointHeadTemplateID != "t1" || sandboxRecord.CheckpointHeadBootIndexDigest != checkpointDigest {
+	if sandboxRecord.CheckpointHeadTemplateID != checkpointDigest || sandboxRecord.CheckpointHeadBootIndexDigest != checkpointDigest {
 		t.Fatalf("checkpoint head = %#v", sandboxRecord)
 	}
 }
@@ -211,17 +210,17 @@ func TestBoltStorePublishCheckpointCASFailureLeavesBothRecordsUnchanged(t *testi
 	}); err != nil {
 		t.Fatal(err)
 	}
+	checkpointDigest := digest.FromString("checkpoint").String()
 	if err := store.PublishCheckpoint(ctx, conchtemplate.Entry{
-		ID:               "t1",
+		ID:               checkpointDigest,
 		Origin:           conchtemplate.OriginCheckpoint,
 		BootMode:         conchtemplate.BootModeResume,
-		BootIndexDigest:  digest.FromString("checkpoint").String(),
 		ParentTemplateID: "old-head",
 		SourceSandboxID:  "sandbox-1",
 	}); err == nil {
 		t.Fatal("PublishCheckpoint() error = nil, want CAS failure")
 	}
-	if _, err := store.GetTemplate(ctx, "t1"); !errors.Is(err, ErrNotFound) {
+	if _, err := store.GetTemplate(ctx, checkpointDigest); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("GetTemplate() error = %v, want ErrNotFound", err)
 	}
 	sandboxRecord, _ := store.GetSandbox(ctx, "sandbox-1")

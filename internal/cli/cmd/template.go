@@ -17,7 +17,6 @@ type templateCreateOptions struct {
 	source     string
 	kernel     string
 	initrd     string
-	tag        string
 	configPath string
 	apiURL     string
 	address    string
@@ -49,7 +48,7 @@ func printTemplateHelp(out io.Writer) {
 	fmt.Fprintln(out, "  unpack   Unpack a Template's Boot Index into snapshots.")
 	fmt.Fprintln(out, "  ls       List templates.")
 	fmt.Fprintln(out, "  inspect  Inspect a template.")
-	fmt.Fprintln(out, "  rm       Remove a template.")
+	fmt.Fprintln(out, "  rm       Remove a template and its unshared resources.")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Run 'conch template <command> --help' for command-specific usage.")
 }
@@ -69,8 +68,6 @@ func PrintTemplateCreateHelp(out io.Writer) {
 	fmt.Fprintln(out, "        kernel file path")
 	fmt.Fprintln(out, "  --initrd string")
 	fmt.Fprintln(out, "        initrd file path")
-	fmt.Fprintln(out, "  -t, --tag string")
-	fmt.Fprintln(out, "        output Conch image tag")
 	fmt.Fprintln(out, "  -api-url string")
 	fmt.Fprintln(out, "        conchd API base URL (default: config server endpoint or http://localhost:4063)")
 	fmt.Fprintln(out, "  -address string")
@@ -87,7 +84,7 @@ func PrintTemplateCreateHelp(out io.Writer) {
 	fmt.Fprintln(out, "        registry password")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Examples:")
-	fmt.Fprintln(out, "  conch template create --source docker.io/library/nginx:latest --kernel ./bzImage --initrd ./conch.initrd -t localhost/conch/nginx:latest")
+	fmt.Fprintln(out, "  conch template create --source docker.io/library/nginx:latest --kernel ./bzImage --initrd ./conch.initrd")
 }
 
 func RunTemplate(ctx context.Context, args []string) error {
@@ -262,8 +259,6 @@ func registerTemplateCreateFlags(fs *flag.FlagSet, opts *templateCreateOptions) 
 	fs.StringVar(&opts.source, "source", "", "source rootfs image")
 	fs.StringVar(&opts.kernel, "kernel", "", "kernel file path")
 	fs.StringVar(&opts.initrd, "initrd", "", "initrd file path")
-	fs.StringVar(&opts.tag, "tag", "", "boot index image tag")
-	fs.StringVar(&opts.tag, "t", "", "boot index image tag")
 	fs.StringVar(&opts.configPath, "config", "", "config file path")
 	fs.StringVar(&opts.apiURL, "api-url", "", "conchd API base URL")
 	fs.StringVar(&opts.address, "address", "", "deprecated alias for -api-url")
@@ -282,13 +277,12 @@ func createTemplate(ctx context.Context, command string, opts templateCreateOpti
 		return fmt.Errorf("%s: create API client: %w", command, err)
 	}
 	res, err := conchClient.CreateTemplate(ctx, client.TemplateCreateRequest{
-		Source:       opts.source,
-		KernelPath:   opts.kernel,
-		InitrdPath:   opts.initrd,
-		BootIndexTag: opts.tag,
-		PlainHTTP:    opts.plainHTTP,
-		Username:     opts.username,
-		Password:     opts.password,
+		Source:     opts.source,
+		KernelPath: opts.kernel,
+		InitrdPath: opts.initrd,
+		PlainHTTP:  opts.plainHTTP,
+		Username:   opts.username,
+		Password:   opts.password,
 	})
 	if err != nil {
 		return fmt.Errorf("%s: %w", command, err)
@@ -299,8 +293,8 @@ func createTemplate(ctx context.Context, command string, opts templateCreateOpti
 
 func printTemplateCreateSummary(out io.Writer, res client.TemplateCreateResponse) {
 	fmt.Fprintf(out, "Template: %s\n", res.TemplateID)
-	if res.BootIndexTag != "" {
-		fmt.Fprintf(out, "Boot image: %s\n", res.BootIndexTag)
+	if res.BuildRef != "" {
+		fmt.Fprintf(out, "Boot image: %s\n", res.BuildRef)
 	}
 	if res.BootIndexDigest != "" {
 		fmt.Fprintf(out, "Image digest: %s\n", res.BootIndexDigest)

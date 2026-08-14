@@ -16,14 +16,12 @@ provenance, and creation metadata.
 
 | Field | Type | Description | Constraints |
 | --- | --- | --- | --- |
-| `ID` | `string` | Uniquely identifies the Template record. | Required. |
+| `ID` | `string` | Uniquely identifies the Template and its OCI Boot Index. | Required; must be a valid OCI digest. |
 | `Origin` | `Origin` | Identifies the process that produced the Template. | Required. |
 | `BootMode` | `BootMode` | Identifies how the Template starts a Sandbox. | Required. |
-| `BootIndexDigest` | `string` | References the OCI Boot Index associated with the Template. | Required; must be a valid OCI digest. |
 | `ParentTemplateID` | `string` | Identifies the parent Template when this record derives from another Template. | Optional. |
 | `SourceSandboxID` | `string` | Identifies the Sandbox used to produce the Template. | Optional. |
 | `ImageName` | `string` | Records the source image name associated with the Template. | Optional. |
-| `BuildRef` | `string` | Records the external build reference associated with the Template. | Optional. |
 | `Labels` | `map[string]string` | Stores caller-defined metadata as key-value pairs. | Optional. |
 | `CreatedAt` | `int64` | Records when the Template record was created. | Unix nanoseconds; assigned by `Create` when zero. |
 
@@ -67,6 +65,10 @@ Create(ctx context.Context, entry Entry) (Entry, error)
 
 Creates a new Template record after validating the `Entry` constraints above.
 A zero `CreatedAt` is set to the current Unix time in nanoseconds.
+
+The local Boot Index image record is not persisted in `Entry`. Its name is
+derived from `ID` as
+`localhost/conch/template:<algorithm>-<encoded-digest>`.
 
 The record is inserted atomically. An existing record is never overwritten; a
 duplicate `ID` returns `ErrAlreadyExists`. On success, `Create` returns the

@@ -122,12 +122,11 @@ type templateIDRequest struct {
 }
 
 type templateCreateRequest struct {
-	Source       string            `json:"source"`
-	BootIndexTag string            `json:"boot_index_tag,omitempty"`
-	PlainHTTP    bool              `json:"plain_http,omitempty"`
-	Username     string            `json:"username,omitempty"`
-	Password     string            `json:"password,omitempty"`
-	Labels       map[string]string `json:"labels,omitempty"`
+	Source    string            `json:"source"`
+	PlainHTTP bool              `json:"plain_http,omitempty"`
+	Username  string            `json:"username,omitempty"`
+	Password  string            `json:"password,omitempty"`
+	Labels    map[string]string `json:"labels,omitempty"`
 }
 
 type templatePullRequest struct {

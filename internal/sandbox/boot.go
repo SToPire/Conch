@@ -134,10 +134,7 @@ func (p *bootPreparer) resolveTemplate(
 	if err != nil {
 		return conchimage.ResolvedBoot{}, template.Entry{}, err
 	}
-	bootIndexDigest := strings.TrimSpace(entry.BootIndexDigest)
-	if bootIndexDigest == "" {
-		return conchimage.ResolvedBoot{}, template.Entry{}, fmt.Errorf("template %s has no boot index digest", entry.ID)
-	}
+	bootIndexDigest := entry.ID
 	resolved, err := p.resolveBoot(ctx, bootIndexDigest)
 	if err != nil {
 		return conchimage.ResolvedBoot{}, template.Entry{}, fmt.Errorf(

@@ -26,7 +26,7 @@ func PrintTemplateUnpackHelp(out io.Writer) {
 	fmt.Fprintln(out, "        config file path (default: auto-detect common config paths)")
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Example:")
-	fmt.Fprintln(out, "  conch template unpack tmpl_ab2345da0a69b4e18aa24ad6")
+	fmt.Fprintln(out, "  conch template unpack sha256:<boot-index-digest>")
 }
 
 func runTemplateUnpack(ctx context.Context, args []string) error {

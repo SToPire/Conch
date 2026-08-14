@@ -30,11 +30,9 @@ type templateRecord struct {
 	ID               string            `json:"id"`
 	Origin           string            `json:"origin"`
 	BootMode         string            `json:"boot_mode"`
-	BootIndexDigest  string            `json:"boot_index_digest"`
 	ParentTemplateID string            `json:"parent_template_id,omitempty"`
 	SourceSandboxID  string            `json:"source_sandbox_id,omitempty"`
 	ImageName        string            `json:"image_name,omitempty"`
-	BuildRef         string            `json:"build_ref,omitempty"`
 	Labels           map[string]string `json:"labels,omitempty"`
 	CreatedAt        int64             `json:"created_at"`
 }
@@ -271,7 +269,7 @@ func (s *BoltStore) PublishCheckpoint(_ context.Context, checkpoint conchtemplat
 			return fmt.Errorf("template %s source sandbox %s does not match %s", templateID, sourceID, sandboxRecord.SandboxID)
 		}
 		sandboxRecord.CheckpointHeadTemplateID = templateID
-		sandboxRecord.CheckpointHeadBootIndexDigest = entry.BootIndexDigest
+		sandboxRecord.CheckpointHeadBootIndexDigest = entry.ID
 		sandboxData, err := json.Marshal(sandboxRecord)
 		if err != nil {
 			return fmt.Errorf("marshal sandbox record: %w", err)
@@ -288,11 +286,9 @@ func templateRecordFromEntry(entry conchtemplate.Entry) templateRecord {
 		ID:               entry.ID,
 		Origin:           string(entry.Origin),
 		BootMode:         string(entry.BootMode),
-		BootIndexDigest:  entry.BootIndexDigest,
 		ParentTemplateID: entry.ParentTemplateID,
 		SourceSandboxID:  entry.SourceSandboxID,
 		ImageName:        entry.ImageName,
-		BuildRef:         entry.BuildRef,
 		Labels:           entry.Labels,
 		CreatedAt:        entry.CreatedAt,
 	}
@@ -303,11 +299,9 @@ func templateEntryFromRecord(rec templateRecord) (conchtemplate.Entry, error) {
 		ID:               rec.ID,
 		Origin:           conchtemplate.Origin(rec.Origin),
 		BootMode:         conchtemplate.BootMode(rec.BootMode),
-		BootIndexDigest:  rec.BootIndexDigest,
 		ParentTemplateID: rec.ParentTemplateID,
 		SourceSandboxID:  rec.SourceSandboxID,
 		ImageName:        rec.ImageName,
-		BuildRef:         rec.BuildRef,
 		Labels:           rec.Labels,
 		CreatedAt:        rec.CreatedAt,
 	})

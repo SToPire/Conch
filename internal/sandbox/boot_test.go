@@ -120,28 +120,6 @@ func TestBootPreparerResumeRestoresResolvedBootIndex(t *testing.T) {
 	}
 }
 
-func TestBootPreparerRejectsMissingBootIndexDigest(t *testing.T) {
-	entry := template.Entry{
-		ID:       "tmpl_missing",
-		Origin:   template.OriginImage,
-		BootMode: template.BootModeCold,
-	}
-	templates := &fakeTemplateReader{entry: entry}
-	resolver := &fakeBootResolver{}
-	snapshots := &fakeSnapshotBackend{}
-
-	_, err := mustBootPreparer(t, templates, snapshots, resolver).Prepare(context.Background(), PrepareBootRequest{
-		TemplateID: entry.ID,
-		SandboxID:  "sandbox-a",
-	})
-	if err == nil || !strings.Contains(err.Error(), "has no boot index digest") {
-		t.Fatalf("Prepare() error = %v, want missing digest error", err)
-	}
-	if len(resolver.requests) != 0 || snapshots.callCount() != 0 {
-		t.Fatalf("backends called for missing digest: resolver=%#v snapshots=%#v", resolver.requests, snapshots)
-	}
-}
-
 func TestBootPreparerRejectsCachedCapabilityMismatch(t *testing.T) {
 	for _, tt := range []struct {
 		name         string
@@ -353,10 +331,9 @@ func newBootTemplate(t *testing.T, origin template.Origin, mode template.BootMod
 	t.Helper()
 	bootDigest := digest.FromString(t.Name() + "/" + string(origin) + "/" + string(mode)).String()
 	entry := template.Entry{
-		ID:              "tmpl_" + digest.FromString(t.Name()).Encoded()[:24],
-		Origin:          origin,
-		BootMode:        mode,
-		BootIndexDigest: bootDigest,
+		ID:       bootDigest,
+		Origin:   origin,
+		BootMode: mode,
 	}
 	return &fakeTemplateReader{entry: entry}, entry, bootDigest
 }

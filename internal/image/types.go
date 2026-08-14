@@ -9,6 +9,8 @@ import (
 var (
 	ErrInvalidRequest      = errors.New("invalid image request")
 	ErrOCIConversionFailed = errors.New("oci conversion failed")
+	ErrImageNotFound       = errors.New("image not found")
+	ErrTemplateManaged     = errors.New("image is managed by a template")
 )
 
 // RegistryPullOptions contains the registry inputs shared by OCI image and
@@ -25,7 +27,6 @@ type PublishBootIndexOptions struct {
 	RootfsImageName string `json:"rootfs_image_name"`
 	KernelPath      string `json:"kernel_path"`
 	InitrdPath      string `json:"initrd_path"`
-	BootIndexTag    string `json:"boot_index_tag"`
 }
 
 type PublishBootIndexResult struct {
@@ -52,7 +53,6 @@ type BootIndexInfo struct {
 // layout is defined by VMMName.
 type PublishCheckpointBootIndexOptions struct {
 	SourceBootIndexDigest string `json:"source_boot_index_digest"`
-	BootIndexTag          string `json:"boot_index_tag"`
 	MemRoot               string `json:"mem_root"`
 	VMMName               string `json:"vmm_name"`
 	MemorySizeMB          int64  `json:"memory_size_mb"`

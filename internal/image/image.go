@@ -9,6 +9,7 @@ import (
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/remotes/docker"
+	"github.com/containerd/errdefs"
 	digestpkg "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
@@ -50,13 +51,25 @@ func PullBootIndex(ctx context.Context, client *containerdclient.Client, req Reg
 	}
 
 	pullCtx := containerdclient.NewNamespaceContext(ctx)
-	fetched, _, err := pullRegistryContent(pullCtx, client, req, true)
+	fetched, kind, err := pullRegistryContent(pullCtx, client, req, true)
 	if err != nil {
 		return BootIndexInfo{}, err
 	}
 	info, err := InspectBootIndexContent(pullCtx, client.ContentStore(), fetched.Target)
 	if err != nil {
 		return BootIndexInfo{}, fmt.Errorf("validate pulled Boot Index %s: %w", fetched.Name, err)
+	}
+	canonicalName, err := BootIndexRecordName(info.BootIndexDigest)
+	if err != nil {
+		return BootIndexInfo{}, err
+	}
+	if err := publishBootIndexRecord(pullCtx, client, canonicalName, fetched.Target, kind); err != nil {
+		return BootIndexInfo{}, fmt.Errorf("publish canonical Boot Index record: %w", err)
+	}
+	if fetched.Name != canonicalName {
+		if err := RemoveBootIndexRecord(pullCtx, client, fetched.Name, info.BootIndexDigest, false); err != nil {
+			return BootIndexInfo{}, fmt.Errorf("remove fetched Boot Index alias: %w", err)
+		}
 	}
 	return info, nil
 }
@@ -249,10 +262,20 @@ func Remove(ctx context.Context, client *containerdclient.Client, req runtimeapi
 	}
 	removeCtx := containerdclient.NewNamespaceContext(ctx)
 	opts := []images.DeleteOpt{}
+	if rawDigest := strings.TrimSpace(req.ExpectedTargetDigest); rawDigest != "" {
+		targetDigest, err := digestpkg.Parse(rawDigest)
+		if err != nil {
+			return fmt.Errorf("%w: invalid expected target digest %q: %v", ErrInvalidRequest, rawDigest, err)
+		}
+		opts = append(opts, images.DeleteTarget(&ocispec.Descriptor{Digest: targetDigest}))
+	}
 	if req.Synchronous {
 		opts = append(opts, images.SynchronousDelete())
 	}
 	if err := client.ImageService().Delete(removeCtx, req.ImageName, opts...); err != nil {
+		if errdefs.IsNotFound(err) {
+			return fmt.Errorf("%w: %s", ErrImageNotFound, req.ImageName)
+		}
 		return fmt.Errorf("remove image %s: %w", req.ImageName, err)
 	}
 	return nil

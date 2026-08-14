@@ -20,8 +20,7 @@ Template 是 Conch 中创建 Sandbox 使用的模板，使用 `conch template` �
 conch template create \
   --source docker.io/openeuler/openeuler:24.03-lts-sp2 \
   --kernel /var/lib/conch/kernel \
-  --initrd /var/lib/conch/conch.initrd \
-  -t localhost/conch/openeuler:latest
+  --initrd /var/lib/conch/conch.initrd
 ```
 
 示例：
@@ -29,34 +28,34 @@ conch template create \
 ```console
 # 列出所有 Template
 $ conch template ls
-ID                             ORIGIN      BOOT_MODE  BOOT_INDEX_DIGEST  SOURCE_SANDBOX  BUILD_REF
-tmpl_ab2345da0a69b4e18aa24ad6  image       cold       sha256:1111...     -               localhost/conch/openeuler:latest
+ID              ORIGIN  BOOT_MODE  BOOT_INDEX_DIGEST  SOURCE_SANDBOX  BUILD_REF
+sha256:1111...  image   cold       sha256:1111...     -               localhost/conch/template:sha256-1111...
 
 # 查看指定 Template
-$ conch template inspect tmpl_ab2345da0a69b4e18aa24ad6
-ID                             ORIGIN  BOOT_MODE  BOOT_INDEX_DIGEST  SOURCE_SANDBOX  BUILD_REF
-tmpl_ab2345da0a69b4e18aa24ad6  image   cold       sha256:1111...     -               localhost/conch/openeuler:latest
+$ conch template inspect sha256:1111...
+ID              ORIGIN  BOOT_MODE  BOOT_INDEX_DIGEST  SOURCE_SANDBOX  BUILD_REF
+sha256:1111...  image   cold       sha256:1111...     -               localhost/conch/template:sha256-1111...
 
 # 删除指定 Template
-$ conch template rm tmpl_ab2345da0a69b4e18aa24ad6
-Removed template: tmpl_ab2345da0a69b4e18aa24ad6
+$ conch template rm sha256:1111...
+Removed template: sha256:1111...
 ```
 
 ## 2. Template 分发
 
-`conch template push / pull` 用于向镜像仓库发布 Template，或从镜像仓库拉取 Template。拉取时会校验 Boot Index、创建本地 Template 并返回新的 Template ID。
+`conch template push / pull` 用于向镜像仓库发布 Template，或从镜像仓库拉取 Template。Template ID 就是规范化的 Boot Index digest；本地 Boot Index image record 名称也由该 digest 确定性生成。
 
 示例：
 
 ```console
 # 将 Template 发布到镜像仓库
-$ conch template push tmpl_ab2345da0a69b4e18aa24ad6 registry.example.com/conch/openeuler:latest
-Pushed template: tmpl_ab2345da0a69b4e18aa24ad6 -> registry.example.com/conch/openeuler:latest
+$ conch template push sha256:1111... registry.example.com/conch/openeuler:latest
+Pushed template: sha256:1111... -> registry.example.com/conch/openeuler:latest
 
 # 从镜像仓库拉取 Template
 $ conch template pull registry.example.com/conch/openeuler:latest
-Template: tmpl_c35e71ba26e24b6a92eca151
-Boot image: registry.example.com/conch/openeuler:latest
+Template: sha256:2222...
+Boot image: localhost/conch/template:sha256-2222...
 Image digest: sha256:2222...
 ```
 

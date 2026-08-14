@@ -18,12 +18,11 @@ func TestStoreCRUDAndList(t *testing.T) {
 
 	bootIndexDigest := digest.FromString("cold boot index").String()
 	entry, err := store.Create(ctx, Entry{
-		ID:              "tmpl_1",
-		Origin:          OriginImage,
-		BootMode:        BootModeCold,
-		BootIndexDigest: bootIndexDigest,
-		ImageName:       "image-ref",
-		Labels:          map[string]string{"purpose": "test"},
+		ID:        bootIndexDigest,
+		Origin:    OriginImage,
+		BootMode:  BootModeCold,
+		ImageName: "image-ref",
+		Labels:    map[string]string{"purpose": "test"},
 	})
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
@@ -36,7 +35,7 @@ func TestStoreCRUDAndList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
-	if got.BootIndexDigest != bootIndexDigest || got.BootMode != BootModeCold {
+	if got.ID != bootIndexDigest || got.BootMode != BootModeCold {
 		t.Fatalf("entry = %#v", got)
 	}
 
@@ -69,30 +68,30 @@ func TestStoreCreateValidatesCompleteEntry(t *testing.T) {
 		{
 			name: "missing id",
 			entry: Entry{
-				Origin: OriginImage, BootMode: BootModeCold, BootIndexDigest: validDigest,
+				Origin: OriginImage, BootMode: BootModeCold,
 			},
-			want: "template id is required",
+			want: "invalid template id",
 		},
 		{
 			name: "invalid origin",
 			entry: Entry{
-				ID: "tmpl_1", Origin: "archive", BootMode: BootModeCold, BootIndexDigest: validDigest,
+				ID: validDigest, Origin: "archive", BootMode: BootModeCold,
 			},
 			want: "unknown template origin",
 		},
 		{
 			name: "invalid boot mode",
 			entry: Entry{
-				ID: "tmpl_1", Origin: OriginImage, BootMode: "warm", BootIndexDigest: validDigest,
+				ID: validDigest, Origin: OriginImage, BootMode: "warm",
 			},
 			want: "unknown template boot mode",
 		},
 		{
-			name: "invalid digest",
+			name: "invalid template id",
 			entry: Entry{
-				ID: "tmpl_1", Origin: OriginImage, BootMode: BootModeCold, BootIndexDigest: "sha256:invalid",
+				ID: "sha256:invalid", Origin: OriginImage, BootMode: BootModeCold,
 			},
-			want: "invalid boot index digest",
+			want: "invalid template id",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -111,20 +110,18 @@ func TestStoreDuplicateIDDoesNotOverwrite(t *testing.T) {
 	store := NewStore(raw)
 	firstDigest := digest.FromString("first").String()
 	first, err := store.Create(ctx, Entry{
-		ID:              "tmpl_same",
-		Origin:          OriginImage,
-		BootMode:        BootModeCold,
-		BootIndexDigest: firstDigest,
+		ID:       firstDigest,
+		Origin:   OriginImage,
+		BootMode: BootModeCold,
 	})
 	if err != nil {
 		t.Fatalf("first Create() error = %v", err)
 	}
 
 	_, err = store.Create(ctx, Entry{
-		ID:              first.ID,
-		Origin:          OriginCheckpoint,
-		BootMode:        BootModeResume,
-		BootIndexDigest: digest.FromString("second").String(),
+		ID:       first.ID,
+		Origin:   OriginCheckpoint,
+		BootMode: BootModeResume,
 	})
 	if !errors.Is(err, ErrAlreadyExists) {
 		t.Fatalf("second Create() error = %v, want ErrAlreadyExists", err)
@@ -133,25 +130,8 @@ func TestStoreDuplicateIDDoesNotOverwrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
-	if got.BootIndexDigest != firstDigest || got.Origin != OriginImage || got.BootMode != BootModeCold {
+	if got.ID != firstDigest || got.Origin != OriginImage || got.BootMode != BootModeCold {
 		t.Fatalf("first entry was overwritten: %#v", got)
-	}
-}
-
-func TestNewID(t *testing.T) {
-	first, err := NewID()
-	if err != nil {
-		t.Fatalf("NewID() error = %v", err)
-	}
-	second, err := NewID()
-	if err != nil {
-		t.Fatalf("NewID() error = %v", err)
-	}
-	if !strings.HasPrefix(first, "tmpl_") || len(first) != len("tmpl_")+24 {
-		t.Fatalf("NewID() = %q", first)
-	}
-	if first == second {
-		t.Fatalf("NewID() returned duplicate %q", first)
 	}
 }
 

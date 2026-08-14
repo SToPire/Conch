@@ -37,7 +37,6 @@ type BootIndexContentOptions struct {
 	SandboxDescriptor ocispec.Descriptor
 	KernelPath        string
 	InitrdPath        string
-	Tag               string
 	VMMName           string
 	MemorySizeMB      int64
 }
@@ -48,10 +47,6 @@ func BuildBootIndexInContent(ctx context.Context, store content.Store, opts Boot
 	}
 	if !descriptorProvided(opts.RootfsDescriptor) {
 		return ocispec.Descriptor{}, fmt.Errorf("rootfs descriptor is required")
-	}
-	opts.Tag = strings.TrimSpace(opts.Tag)
-	if opts.Tag == "" {
-		return ocispec.Descriptor{}, fmt.Errorf("boot index tag is required")
 	}
 	preparedSandbox := descriptorProvided(opts.SandboxDescriptor)
 	kernelPath := strings.TrimSpace(opts.KernelPath)
@@ -78,14 +73,14 @@ func BuildBootIndexInContent(ctx context.Context, store content.Store, opts Boot
 		return ocispec.Descriptor{}, fmt.Errorf("memory size requires a mem-snapshot component")
 	}
 
-	rootfsDesc, err := normalizeComponentDescriptor(ctx, store, opts.RootfsDescriptor, KindRootfs, opts.Tag+"-rootfs", "")
+	rootfsDesc, err := normalizeComponentDescriptor(ctx, store, opts.RootfsDescriptor, KindRootfs, "")
 	if err != nil {
 		return ocispec.Descriptor{}, fmt.Errorf("resolve rootfs manifest: %w", err)
 	}
 
 	manifests := []ocispec.Descriptor{rootfsDesc}
 	if hasMem {
-		memDesc, err := normalizeComponentDescriptor(ctx, store, opts.MemDescriptor, KindMemSnapshot, opts.Tag+"-mem", vmmName)
+		memDesc, err := normalizeComponentDescriptor(ctx, store, opts.MemDescriptor, KindMemSnapshot, vmmName)
 		if err != nil {
 			return ocispec.Descriptor{}, fmt.Errorf("resolve mem-snapshot manifest: %w", err)
 		}
@@ -97,9 +92,9 @@ func BuildBootIndexInContent(ctx context.Context, store content.Store, opts Boot
 
 	var sandboxDesc ocispec.Descriptor
 	if preparedSandbox {
-		sandboxDesc, err = normalizeComponentDescriptor(ctx, store, opts.SandboxDescriptor, KindSandbox, opts.Tag+"-sandbox", "")
+		sandboxDesc, err = normalizeComponentDescriptor(ctx, store, opts.SandboxDescriptor, KindSandbox, "")
 	} else {
-		sandboxDesc, err = buildKernelComponentInContent(ctx, store, kernelPath, initrdPath, opts.Tag+"-sandbox")
+		sandboxDesc, err = buildKernelComponentInContent(ctx, store, kernelPath, initrdPath)
 	}
 	if err != nil {
 		return ocispec.Descriptor{}, fmt.Errorf("resolve sandbox manifest: %w", err)
@@ -116,7 +111,7 @@ func BuildBootIndexInContent(ctx context.Context, store content.Store, opts Boot
 	return writeIndexToContent(ctx, store, manifests, indexAnnotations)
 }
 
-func buildKernelComponentInContent(ctx context.Context, store content.Store, kernelPath, initrdPath, tag string) (ocispec.Descriptor, error) {
+func buildKernelComponentInContent(ctx context.Context, store content.Store, kernelPath, initrdPath string) (ocispec.Descriptor, error) {
 	tmpDir, err := os.MkdirTemp("", "conch-kernel-component-*")
 	if err != nil {
 		return ocispec.Descriptor{}, fmt.Errorf("create kernel component temp dir: %w", err)
@@ -136,23 +131,19 @@ func buildKernelComponentInContent(ctx context.Context, store content.Store, ker
 	if err := continuityfs.CopyFile(filepath.Join(root, "data", "conch.initrd"), initrdPath); err != nil {
 		return ocispec.Descriptor{}, err
 	}
-	return BuildNativeComponentInContent(ctx, store, []string{root}, KindSandbox, tag)
+	return BuildNativeComponentInContent(ctx, store, []string{root}, KindSandbox)
 }
 
 // BuildNativeComponentInContent writes regular native EROFS files and/or
 // directories converted to native EROFS layers into store, then publishes the
 // component manifest and config. It accepts only the three supported Conch
 // component kinds and rejects symlink/special-file inputs.
-func BuildNativeComponentInContent(ctx context.Context, store content.Store, paths []string, kind, tag string) (ocispec.Descriptor, error) {
+func BuildNativeComponentInContent(ctx context.Context, store content.Store, paths []string, kind string) (ocispec.Descriptor, error) {
 	if store == nil {
 		return ocispec.Descriptor{}, fmt.Errorf("content store is required")
 	}
 	if !isNativeErofsKind(kind) {
 		return ocispec.Descriptor{}, fmt.Errorf("unsupported native component kind %q", kind)
-	}
-	tag = strings.TrimSpace(tag)
-	if tag == "" {
-		return ocispec.Descriptor{}, fmt.Errorf("%s component tag is required", kind)
 	}
 	if len(paths) == 0 {
 		return ocispec.Descriptor{}, fmt.Errorf("%s component has no paths", kind)
@@ -241,10 +232,7 @@ func BuildNativeComponentInContent(ctx context.Context, store content.Store, pat
 	if err != nil {
 		return ocispec.Descriptor{}, err
 	}
-	manifestDesc.Annotations = map[string]string{
-		"io.conch.kind":                     kind,
-		"org.opencontainers.image.ref.name": tag,
-	}
+	manifestDesc.Annotations = map[string]string{"io.conch.kind": kind}
 	return manifestDesc, nil
 }
 
@@ -256,7 +244,7 @@ func normalizeComponentDescriptor(
 	ctx context.Context,
 	store content.Store,
 	desc ocispec.Descriptor,
-	expectedKind, refName, vmmName string,
+	expectedKind, vmmName string,
 ) (ocispec.Descriptor, error) {
 	if err := validateDescriptor(desc, expectedKind+" input"); err != nil {
 		return ocispec.Descriptor{}, err
@@ -277,10 +265,7 @@ func normalizeComponentDescriptor(
 	if err := validateContentClosure(ctx, store, manifest); err != nil {
 		return ocispec.Descriptor{}, fmt.Errorf("validate %s component closure: %w", expectedKind, err)
 	}
-	annotations := map[string]string{
-		"io.conch.kind":                     expectedKind,
-		"org.opencontainers.image.ref.name": refName,
-	}
+	annotations := map[string]string{"io.conch.kind": expectedKind}
 	if vmmName != "" {
 		annotations[AnnotationVMM] = vmmName
 	}
@@ -378,8 +363,18 @@ func contentRef(kind string, dgst digest.Digest) string {
 // InspectBootIndex resolves and validates a Boot Index directly by digest. It
 // does not create image records or snapshots.
 func InspectBootIndex(ctx context.Context, client *containerdclient.Client, bootIndexDigest string) (BootIndexInfo, error) {
-	_, info, err := inspectBootIndex(ctx, client, bootIndexDigest)
-	return info, err
+	if client == nil || client.Client == nil {
+		return BootIndexInfo{}, fmt.Errorf("containerd client is required")
+	}
+	if strings.TrimSpace(bootIndexDigest) == "" {
+		return BootIndexInfo{}, fmt.Errorf("%w: boot_index_digest is required", ErrInvalidRequest)
+	}
+	inspectCtx := containerdclient.NewNamespaceContext(ctx)
+	_, info, err := inspectBootIndexByDigest(inspectCtx, client.ContentStore(), bootIndexDigest)
+	if err != nil {
+		return BootIndexInfo{}, err
+	}
+	return info, nil
 }
 
 // InspectBootIndexReference validates the complete Boot Index closure named
@@ -402,25 +397,6 @@ func InspectBootIndexReference(ctx context.Context, client *containerdclient.Cli
 		return BootIndexInfo{}, fmt.Errorf("inspect boot index reference %s: %w", reference, err)
 	}
 	return info, nil
-}
-
-func inspectBootIndex(
-	ctx context.Context,
-	client *containerdclient.Client,
-	bootIndexDigest string,
-) (context.Context, BootIndexInfo, error) {
-	if client == nil || client.Client == nil {
-		return nil, BootIndexInfo{}, fmt.Errorf("containerd client is required")
-	}
-	if strings.TrimSpace(bootIndexDigest) == "" {
-		return nil, BootIndexInfo{}, fmt.Errorf("%w: boot_index_digest is required", ErrInvalidRequest)
-	}
-	resolveCtx := containerdclient.NewNamespaceContext(ctx)
-	_, info, err := inspectBootIndexByDigest(resolveCtx, client.ContentStore(), bootIndexDigest)
-	if err != nil {
-		return nil, BootIndexInfo{}, err
-	}
-	return resolveCtx, info, nil
 }
 
 // inspectBootIndexByDigest resolves and validates a Boot Index directly from

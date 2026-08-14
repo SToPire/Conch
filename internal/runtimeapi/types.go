@@ -73,20 +73,19 @@ type SandboxCheckpointResult struct {
 }
 
 type TemplateCreateOptions struct {
-	Source       string
-	KernelPath   string
-	InitrdPath   string
-	BootIndexTag string
-	PlainHTTP    bool
-	Username     string
-	Password     string
-	Labels       map[string]string
+	Source     string
+	KernelPath string
+	InitrdPath string
+	PlainHTTP  bool
+	Username   string
+	Password   string
+	Labels     map[string]string
 }
 
 type TemplateCreateResult struct {
 	TemplateID      string
 	BootIndexDigest string
-	BootIndexTag    string
+	BuildRef        string
 }
 
 type TemplatePullOptions struct {
@@ -153,8 +152,9 @@ type ListImagesOptions struct {
 }
 
 type RemoveImageOptions struct {
-	ImageName   string
-	Synchronous bool
+	ImageName            string
+	ExpectedTargetDigest string
+	Synchronous          bool
 }
 
 type ImageRecord struct {

@@ -12,12 +12,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/core/leases"
+	"github.com/containerd/containerd/v2/core/snapshots"
+	"github.com/containerd/errdefs"
 	"github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	containerdhost "github.com/openeuler/Conch/internal/adapters/containerd/host"
 	"github.com/openeuler/Conch/internal/daemon/state"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/netstack"
+	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/sandbox"
 	conchtemplate "github.com/openeuler/Conch/internal/template"
 )
@@ -109,11 +115,11 @@ func TestCheckpointSandboxPublishesCaptureAndAtomicallyAdvancesHead(t *testing.T
 	sandboxOps := &fakeSandboxOps{checkpointResults: []sandbox.CheckpointResult{captured}}
 	store := newTestStore(t)
 	svc := New(sandboxOps, host.Client(), store)
-	seedTemplate(t, ctx, svc.Templates, "t0", t0Digest, conchtemplate.BootModeCold)
+	seedTemplate(t, ctx, svc.Templates, t0Digest, conchtemplate.BootModeCold)
 
 	before := state.SandboxRecord{
 		SandboxID:                     "sandbox-a",
-		CheckpointHeadTemplateID:      "t0",
+		CheckpointHeadTemplateID:      t0Digest,
 		CheckpointHeadBootIndexDigest: t0Digest,
 	}
 	if err := store.UpsertSandbox(ctx, before); err != nil {
@@ -127,7 +133,7 @@ func TestCheckpointSandboxPublishesCaptureAndAtomicallyAdvancesHead(t *testing.T
 	if err != nil {
 		t.Fatalf("CheckpointSandbox() error = %v", err)
 	}
-	if result.TemplateID == "" || result.BootIndexDigest == "" || result.BootIndexDigest == t0Digest {
+	if result.TemplateID == "" || result.TemplateID != result.BootIndexDigest || result.BootIndexDigest == t0Digest {
 		t.Fatalf("CheckpointSandbox() = %#v", result)
 	}
 	if len(sandboxOps.checkpointRequests) != 1 {
@@ -148,11 +154,10 @@ func TestCheckpointSandboxPublishesCaptureAndAtomicallyAdvancesHead(t *testing.T
 	if err != nil {
 		t.Fatalf("GetTemplate(t1) error = %v", err)
 	}
-	if t1.BootIndexDigest != result.BootIndexDigest || t1.BootMode != conchtemplate.BootModeResume {
+	if t1.ID != result.BootIndexDigest || t1.BootMode != conchtemplate.BootModeResume {
 		t.Fatalf("t1 entry = %#v", t1)
 	}
-	if t1.ParentTemplateID != "t0" || t1.SourceSandboxID != "sandbox-a" ||
-		t1.BuildRef != "localhost/conch/template:"+result.TemplateID || t1.Labels["generation"] != "t1" {
+	if t1.ParentTemplateID != t0Digest || t1.SourceSandboxID != "sandbox-a" || t1.Labels["generation"] != "t1" {
 		t.Fatalf("t1 lineage = %#v", t1)
 	}
 
@@ -180,10 +185,10 @@ func TestCheckpointSandboxDoesNotPersistBeforeValidationSucceeds(t *testing.T) {
 	}}}
 	store := newTestStore(t)
 	svc := New(sandboxOps, host.Client(), store)
-	seedTemplate(t, ctx, svc.Templates, "t0", sourceDigest, conchtemplate.BootModeCold)
+	seedTemplate(t, ctx, svc.Templates, sourceDigest, conchtemplate.BootModeCold)
 	before := state.SandboxRecord{
 		SandboxID:                     "sandbox-validation-failure",
-		CheckpointHeadTemplateID:      "t0",
+		CheckpointHeadTemplateID:      sourceDigest,
 		CheckpointHeadBootIndexDigest: sourceDigest,
 	}
 	if err := store.UpsertSandbox(ctx, before); err != nil {
@@ -199,7 +204,7 @@ func TestCheckpointSandboxDoesNotPersistBeforeValidationSucceeds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTemplates() error = %v", err)
 	}
-	if len(templates) != 1 || templates[0].ID != "t0" {
+	if len(templates) != 1 || templates[0].ID != sourceDigest {
 		t.Fatalf("templates after failed validation = %#v, want only source template", templates)
 	}
 	after, err := store.GetSandbox(ctx, before.SandboxID)
@@ -223,10 +228,10 @@ func TestCheckpointSandboxBuildsConsecutiveTemplateLineage(t *testing.T) {
 	}}
 	store := newTestStore(t)
 	svc := New(sandboxOps, host.Client(), store)
-	seedTemplate(t, ctx, svc.Templates, "t0", t0Digest, conchtemplate.BootModeCold)
+	seedTemplate(t, ctx, svc.Templates, t0Digest, conchtemplate.BootModeCold)
 	if err := store.UpsertSandbox(ctx, state.SandboxRecord{
 		SandboxID:                     "sandbox-lineage",
-		CheckpointHeadTemplateID:      "t0",
+		CheckpointHeadTemplateID:      t0Digest,
 		CheckpointHeadBootIndexDigest: t0Digest,
 	}); err != nil {
 		t.Fatalf("UpsertSandbox() error = %v", err)
@@ -255,10 +260,10 @@ func TestCheckpointSandboxBuildsConsecutiveTemplateLineage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetTemplate(t2) error = %v", err)
 	}
-	if t1.ParentTemplateID != "t0" || t2.ParentTemplateID != t1.ID {
+	if t1.ParentTemplateID != t0Digest || t2.ParentTemplateID != t1.ID {
 		t.Fatalf("template lineage: t1 parent = %q, t2 parent = %q", t1.ParentTemplateID, t2.ParentTemplateID)
 	}
-	if t1.BootIndexDigest != t1Result.BootIndexDigest || t2.BootIndexDigest != t2Result.BootIndexDigest {
+	if t1.ID != t1Result.BootIndexDigest || t2.ID != t2Result.BootIndexDigest {
 		t.Fatalf("checkpoint template entries = (%#v, %#v)", t1, t2)
 	}
 
@@ -652,18 +657,282 @@ func TestUnpackTemplateResolvesBootIndexByDigest(t *testing.T) {
 	svc := New(nil, host.Client(), store)
 
 	if _, err := svc.Templates.Create(ctx, conchtemplate.Entry{
-		ID:              "tmpl_unpack",
-		Origin:          conchtemplate.OriginImage,
-		BootMode:        conchtemplate.BootModeCold,
-		BootIndexDigest: bootIndexDigest,
-		ImageName:       "not-the-boot-index:latest",
-		BuildRef:        "also-not-used:latest",
+		ID:        bootIndexDigest,
+		Origin:    conchtemplate.OriginImage,
+		BootMode:  conchtemplate.BootModeCold,
+		ImageName: "not-the-boot-index:latest",
 	}); err != nil {
 		t.Fatalf("create template: %v", err)
 	}
 
-	if err := svc.UnpackTemplate(ctx, TemplateUnpackOptions{TemplateID: "tmpl_unpack"}); err != nil {
+	if err := svc.UnpackTemplate(ctx, TemplateUnpackOptions{TemplateID: bootIndexDigest}); err != nil {
 		t.Fatalf("UnpackTemplate() error = %v", err)
+	}
+}
+
+func TestRemoveTemplateRejectsSandboxReference(t *testing.T) {
+	ctx := context.Background()
+	host := newRuntimeImageHost(t)
+	store := newTestStore(t)
+	svc := New(nil, host.Client(), store)
+	bootDigest := buildColdBootIndex(t, host, "in-use-template")
+	seedTemplate(t, ctx, svc.Templates, bootDigest, conchtemplate.BootModeCold)
+	if err := store.UpsertSandbox(ctx, state.SandboxRecord{
+		SandboxID:                     "sandbox-in-use",
+		SourceTemplateID:              bootDigest,
+		CheckpointHeadTemplateID:      bootDigest,
+		CheckpointHeadBootIndexDigest: bootDigest,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.RemoveTemplate(ctx, bootDigest); !errors.Is(err, conchtemplate.ErrInUse) {
+		t.Fatalf("RemoveTemplate() error = %v, want ErrInUse", err)
+	}
+	if _, err := svc.Templates.Get(ctx, bootDigest); err != nil {
+		t.Fatalf("template was removed despite sandbox reference: %v", err)
+	}
+}
+
+func TestRemoveImageProtectsTemplateArtifactsAndDeletesOCIImage(t *testing.T) {
+	ctx := containerdclient.NewNamespaceContext(context.Background())
+	host := newRuntimeImageHost(t)
+	store := newTestStore(t)
+	svc := New(nil, host.Client(), store)
+
+	bootDigest := buildColdBootIndex(t, host, "owned-boot-index")
+	bootInfo, err := host.Client().ContentStore().Info(ctx, digest.Digest(bootDigest))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bootName, err := conchimage.BootIndexRecordName(bootDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := host.Client().ImageService().Create(ctx, images.Image{
+		Name: bootName,
+		Target: ocispec.Descriptor{
+			MediaType: ocispec.MediaTypeImageIndex,
+			Digest:    digest.Digest(bootDigest),
+			Size:      bootInfo.Size,
+		},
+		Labels: map[string]string{conchimage.ImageKindLabel: conchimage.ImageKindBootIndexCold},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	seedTemplate(t, ctx, svc.Templates, bootDigest, conchtemplate.BootModeCold)
+	if err := svc.RemoveImage(ctx, runtimeapi.RemoveImageOptions{ImageName: bootName}); !errors.Is(err, conchimage.ErrTemplateManaged) {
+		t.Fatalf("RemoveImage(owned boot index) error = %v, want ErrTemplateManaged", err)
+	}
+	if _, err := host.Client().ImageService().Get(ctx, bootName); err != nil {
+		t.Fatalf("owned boot index was removed: %v", err)
+	}
+
+	ociName := "localhost/conch/rootfs:ordinary"
+	ociTarget := ocispec.Descriptor{
+		MediaType: ocispec.MediaTypeImageManifest,
+		Digest:    digest.FromString("ordinary-oci-image"),
+		Size:      1,
+	}
+	if _, err := host.Client().ImageService().Create(ctx, images.Image{
+		Name: ociName, Target: ociTarget,
+		Labels: map[string]string{conchimage.ImageKindLabel: conchimage.ImageKindOCIImage},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.RemoveImage(ctx, runtimeapi.RemoveImageOptions{ImageName: ociName}); err != nil {
+		t.Fatalf("RemoveImage(OCI) error = %v", err)
+	}
+	if _, err := host.Client().ImageService().Get(ctx, ociName); err == nil {
+		t.Fatal("ordinary OCI image still exists after removal")
+	}
+}
+
+func TestRemoveTemplateKeepsSharedComponentsAndLetsGCRemoveLastSnapshots(t *testing.T) {
+	host := newRuntimeImageHost(t)
+	ctx := containerdclient.NewNamespaceContext(context.Background())
+	buildCtx, done, err := host.Client().WithLease(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootfsDesc, err := conchimage.BuildNativeComponentInContent(buildCtx, host.Client().ContentStore(), []string{writeTemplateCaptureRoot(t, "cleanup-rootfs")}, conchimage.KindRootfs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sandboxDesc, err := conchimage.BuildNativeComponentInContent(buildCtx, host.Client().ContentStore(), []string{writeTemplateCaptureRoot(t, "cleanup-sandbox")}, conchimage.KindSandbox)
+	if err != nil {
+		t.Fatal(err)
+	}
+	memDesc, err := conchimage.BuildNativeComponentInContent(buildCtx, host.Client().ContentStore(), []string{writeTemplateCaptureRoot(t, "cleanup-memory")}, conchimage.KindMemSnapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coldIndex, err := conchimage.BuildBootIndexInContent(buildCtx, host.Client().ContentStore(), conchimage.BootIndexContentOptions{
+		RootfsDescriptor: rootfsDesc, SandboxDescriptor: sandboxDesc,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumeIndex, err := conchimage.BuildBootIndexInContent(buildCtx, host.Client().ContentStore(), conchimage.BootIndexContentOptions{
+		RootfsDescriptor: rootfsDesc, MemDescriptor: memDesc, SandboxDescriptor: sandboxDesc,
+		VMMName: "cloud-hypervisor", MemorySizeMB: 512,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coldRef, err := conchimage.BootIndexRecordName(coldIndex.Digest.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumeRef, err := conchimage.BootIndexRecordName(resumeIndex.Digest.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	labelHandler := images.SetChildrenLabels(host.Client().ContentStore(), images.ChildrenHandler(host.Client().ContentStore()))
+	for name, target := range map[string]images.Image{
+		coldRef: {
+			Name:   coldRef,
+			Target: coldIndex,
+			Labels: map[string]string{conchimage.ImageKindLabel: conchimage.ImageKindBootIndexCold},
+		},
+		resumeRef: {
+			Name:   resumeRef,
+			Target: resumeIndex,
+			Labels: map[string]string{conchimage.ImageKindLabel: conchimage.ImageKindBootIndexResume},
+		},
+	} {
+		if err := images.WalkNotEmpty(buildCtx, labelHandler, target.Target); err != nil {
+			t.Fatalf("label Boot Index %s content: %v", name, err)
+		}
+		if _, err := host.Client().ImageService().Create(buildCtx, target); err != nil {
+			t.Fatalf("create Boot Index image %s: %v", name, err)
+		}
+	}
+	if err := done(buildCtx); err != nil {
+		t.Fatalf("release build lease: %v", err)
+	}
+
+	store := newTestStore(t)
+	svc := New(nil, host.Client(), store)
+	seedTemplate(t, ctx, svc.Templates, coldIndex.Digest.String(), conchtemplate.BootModeCold)
+	seedTemplate(t, ctx, svc.Templates, resumeIndex.Digest.String(), conchtemplate.BootModeResume)
+	runtimeCtx, _, err := host.Client().WithRuntimeLease(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conchimage.UnpackBootIndex(runtimeCtx, host.Client(), coldIndex.Digest.String()); err != nil {
+		t.Fatalf("unpack cold template: %v", err)
+	}
+	if err := conchimage.UnpackBootIndex(runtimeCtx, host.Client(), resumeIndex.Digest.String()); err != nil {
+		t.Fatalf("unpack resume template: %v", err)
+	}
+	assertNoTemplateOperationLeases(t, ctx, host.Client().LeasesService())
+	for kind, component := range map[string]string{
+		conchimage.KindRootfs:      rootfsDesc.Digest.Encoded(),
+		conchimage.KindSandbox:     sandboxDesc.Digest.Encoded(),
+		conchimage.KindMemSnapshot: memDesc.Digest.Encoded(),
+	} {
+		name := fmt.Sprintf("localhost/conch/%s-component:%s", kind, component)
+		if _, err := host.Client().ImageService().Get(ctx, name); !errdefs.IsNotFound(err) {
+			t.Fatalf("component image %s was persisted or lookup failed: %v", name, err)
+		}
+	}
+	before := templateSnapshotCount(t, ctx, host.Client().SnapshotService("erofs"))
+	if before == 0 {
+		t.Fatal("unpack created no snapshots")
+	}
+
+	if err := svc.RemoveTemplate(ctx, coldIndex.Digest.String()); err != nil {
+		t.Fatalf("remove cold template: %v", err)
+	}
+	if _, err := host.Client().ImageService().Get(ctx, coldRef); !errdefs.IsNotFound(err) {
+		t.Fatalf("cold Boot Index still exists or lookup failed: %v", err)
+	}
+	assertTemplateContentMissing(t, ctx, host.Client(), "cold Boot Index", coldIndex.Digest.String())
+	assertTemplateContentPresent(t, ctx, host.Client(), "shared rootfs", rootfsDesc.Digest.String())
+	assertTemplateContentPresent(t, ctx, host.Client(), "shared sandbox", sandboxDesc.Digest.String())
+	if got := templateSnapshotCount(t, ctx, host.Client().SnapshotService("erofs")); got != before {
+		t.Fatalf("shared snapshots changed from %d to %d", before, got)
+	}
+	assertNoTemplateSnapshotLeaseRefs(t, ctx, host.Client().LeasesService(), containerdclient.RuntimeLeaseID())
+
+	if err := svc.RemoveTemplate(ctx, resumeIndex.Digest.String()); err != nil {
+		t.Fatalf("remove resume template: %v", err)
+	}
+	if got := templateSnapshotCount(t, ctx, host.Client().SnapshotService("erofs")); got != 0 {
+		t.Fatalf("snapshot count after last template removal = %d, want 0", got)
+	}
+	for name, dgst := range map[string]string{
+		"resume Boot Index": resumeIndex.Digest.String(),
+		"rootfs component":  rootfsDesc.Digest.String(),
+		"sandbox component": sandboxDesc.Digest.String(),
+		"memory component":  memDesc.Digest.String(),
+	} {
+		assertTemplateContentMissing(t, ctx, host.Client(), name, dgst)
+	}
+}
+
+func writeTemplateCaptureRoot(t *testing.T, value string) string {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), value)
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "payload"), []byte(value), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+func templateSnapshotCount(t *testing.T, ctx context.Context, snapshotter snapshots.Snapshotter) int {
+	t.Helper()
+	count := 0
+	if err := snapshotter.Walk(ctx, func(context.Context, snapshots.Info) error {
+		count++
+		return nil
+	}); err != nil {
+		t.Fatalf("walk snapshots: %v", err)
+	}
+	return count
+}
+
+func assertTemplateContentPresent(t *testing.T, ctx context.Context, client *containerdclient.Client, name, rawDigest string) {
+	t.Helper()
+	if _, err := client.ContentStore().Info(ctx, digest.Digest(rawDigest)); err != nil {
+		t.Fatalf("%s content %s is missing: %v", name, rawDigest, err)
+	}
+}
+
+func assertTemplateContentMissing(t *testing.T, ctx context.Context, client *containerdclient.Client, name, rawDigest string) {
+	t.Helper()
+	if _, err := client.ContentStore().Info(ctx, digest.Digest(rawDigest)); !errdefs.IsNotFound(err) {
+		t.Fatalf("%s content %s still exists or lookup failed: %v", name, rawDigest, err)
+	}
+}
+
+func assertNoTemplateOperationLeases(t *testing.T, ctx context.Context, manager leases.Manager) {
+	t.Helper()
+	items, err := manager.List(ctx)
+	if err != nil {
+		t.Fatalf("list leases: %v", err)
+	}
+	for _, item := range items {
+		if item.Labels["io.conch.lease.kind"] == "operation" {
+			t.Fatalf("operation lease %s remained after unpack", item.ID)
+		}
+	}
+}
+
+func assertNoTemplateSnapshotLeaseRefs(t *testing.T, ctx context.Context, manager leases.Manager, leaseID string) {
+	t.Helper()
+	resources, err := manager.ListResources(ctx, leases.Lease{ID: leaseID})
+	if err != nil {
+		t.Fatalf("list runtime lease resources: %v", err)
+	}
+	for _, resource := range resources {
+		if resource.Type == "snapshots/erofs" {
+			t.Fatalf("snapshot %s was attached to the runtime lease", resource.ID)
+		}
 	}
 }
 
@@ -711,13 +980,13 @@ func buildColdBootIndex(t *testing.T, host *containerdhost.Host, name string) st
 		}
 	}
 	rootfsDesc, err := conchimage.BuildNativeComponentInContent(
-		ctx, store, []string{rootfsDir}, conchimage.KindRootfs, "localhost/conch/"+name+":rootfs",
+		ctx, store, []string{rootfsDir}, conchimage.KindRootfs,
 	)
 	if err != nil {
 		t.Fatalf("build rootfs component: %v", err)
 	}
 	sandboxDesc, err := conchimage.BuildNativeComponentInContent(
-		ctx, store, []string{sandboxDir}, conchimage.KindSandbox, "localhost/conch/"+name+":sandbox",
+		ctx, store, []string{sandboxDir}, conchimage.KindSandbox,
 	)
 	if err != nil {
 		t.Fatalf("build sandbox component: %v", err)
@@ -725,7 +994,6 @@ func buildColdBootIndex(t *testing.T, host *containerdhost.Host, name string) st
 	indexDesc, err := conchimage.BuildBootIndexInContent(ctx, store, conchimage.BootIndexContentOptions{
 		RootfsDescriptor:  rootfsDesc,
 		SandboxDescriptor: sandboxDesc,
-		Tag:               "localhost/conch/" + name + ":latest",
 	})
 	if err != nil {
 		t.Fatalf("build cold boot index: %v", err)
@@ -738,16 +1006,13 @@ func seedTemplate(
 	ctx context.Context,
 	templates conchtemplate.Store,
 	id string,
-	bootIndexDigest string,
 	bootMode conchtemplate.BootMode,
 ) {
 	t.Helper()
 	if _, err := templates.Create(ctx, conchtemplate.Entry{
-		ID:              id,
-		Origin:          conchtemplate.OriginImage,
-		BootMode:        bootMode,
-		BootIndexDigest: bootIndexDigest,
-		BuildRef:        "localhost/conch/templates:" + id,
+		ID:       id,
+		Origin:   conchtemplate.OriginImage,
+		BootMode: bootMode,
 	}); err != nil {
 		t.Fatalf("CreateTemplate(%s) error = %v", id, err)
 	}

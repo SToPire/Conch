@@ -159,7 +159,6 @@ func New(cfg *config.Config) (*Daemon, error) {
 		VCPUMax:    cfg.Sandbox.DefaultVCPUMax,
 		RamMB:      cfg.Sandbox.DefaultRAMMB,
 	})
-
 	manager := host.SandboxManager()
 	if manager != nil {
 		records, err := store.ListSandboxes(ctx)
@@ -798,20 +797,19 @@ func (s *Daemon) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 		"status":            "ok",
 		"template_id":       result.TemplateID,
 		"boot_index_digest": result.BootIndexDigest,
-		"boot_index_tag":    result.BootIndexTag,
+		"build_ref":         result.BuildRef,
 	})
 }
 
 func (s *Daemon) createTemplate(ctx context.Context, req templateCreateRequest, kernelPath, initrdPath string) (runtimeapi.TemplateCreateResult, error) {
 	return s.runtimeService.CreateTemplate(ctx, runtimeapi.TemplateCreateOptions{
-		Source:       req.Source,
-		KernelPath:   kernelPath,
-		InitrdPath:   initrdPath,
-		BootIndexTag: req.BootIndexTag,
-		PlainHTTP:    req.PlainHTTP,
-		Username:     req.Username,
-		Password:     req.Password,
-		Labels:       req.Labels,
+		Source:     req.Source,
+		KernelPath: kernelPath,
+		InitrdPath: initrdPath,
+		PlainHTTP:  req.PlainHTTP,
+		Username:   req.Username,
+		Password:   req.Password,
+		Labels:     req.Labels,
 	})
 }
 
@@ -1027,20 +1025,19 @@ func (s *Daemon) handleRemoveImage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if s.daemonClient == nil {
-		http.Error(w, "Image service unavailable", http.StatusServiceUnavailable)
-		return
-	}
-
 	var req removeImageRequest
 	if !decodeJSONBody(w, r, &req) {
+		return
+	}
+	if s.runtimeService == nil || s.runtimeService.Containerd == nil {
+		http.Error(w, "Image service unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	opts := runtimeapi.RemoveImageOptions{
 		ImageName:   req.ImageName,
 		Synchronous: req.Synchronous,
 	}
-	if err := conchimage.Remove(r.Context(), s.daemonClient, opts); err != nil {
+	if err := s.runtimeService.RemoveImage(r.Context(), opts); err != nil {
 		logger.Error("Failed to remove image",
 			ulog.F("image_name", opts.ImageName),
 			ulog.F("error", err),
