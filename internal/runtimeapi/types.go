@@ -58,6 +58,10 @@ type SandboxCreateOptions struct {
 	VolumeMounts []volume.Mount
 	Env          map[string]string
 	Network      *SandboxNetworkConfig
+	// E2B requests require envd readiness in addition to conch-init bootstrap.
+	E2B      bool
+	Metadata map[string]string
+	Timeout  time.Duration
 }
 
 type SandboxDefaults struct {
@@ -85,6 +89,7 @@ type SandboxCreateResult struct {
 	VCPUNum      int64
 	RamMB        int64
 	CreatedAt    int64
+	EnvdVersion  string
 }
 
 type SandboxCheckpointOptions struct {

@@ -56,7 +56,7 @@ func TestPrepareRootfsSnapshotUpdatesLayoutAndActivePmem(t *testing.T) {
 		t.Fatalf("prepareRootfsSnapshot() error = %v", err)
 	}
 
-	want := []string{"/layers/rootfs.erofs", "/layers/base.erofs"}
+	want := []string{"/layers/base.erofs", "/layers/rootfs.erofs"}
 	if !slices.Equal(layout.pmemFiles, want) {
 		t.Fatalf("layout pmemFiles = %#v, want %#v", layout.pmemFiles, want)
 	}

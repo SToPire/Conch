@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/containerd/containerd/v2/core/leases"
@@ -16,12 +17,14 @@ import (
 	containerdclient "github.com/openeuler/Conch/internal/adapters/containerd/client"
 	agentprotocol "github.com/openeuler/Conch/internal/agent/protocol"
 	"github.com/openeuler/Conch/internal/apperror"
+	"github.com/openeuler/Conch/internal/envd"
 	"github.com/openeuler/Conch/internal/id"
 	conchimage "github.com/openeuler/Conch/internal/image"
 	"github.com/openeuler/Conch/internal/image/erofsconvert"
 	"github.com/openeuler/Conch/internal/netstack"
 	"github.com/openeuler/Conch/internal/runtimeapi"
 	"github.com/openeuler/Conch/internal/sandbox"
+	"github.com/openeuler/Conch/internal/sandboxproxy"
 	conchtemplate "github.com/openeuler/Conch/internal/template"
 	"github.com/openeuler/Conch/internal/webhook"
 	"github.com/openeuler/Conch/pkg/ulog"
@@ -51,6 +54,12 @@ type Service struct {
 	SandboxDefaults   SandboxDefaults
 	WebhookDispatcher *webhook.Dispatcher
 	lifecycleLocks    sandboxLifecycleLocks
+	Capacity          *Capacity
+	Envd              *envd.Client
+	ProxyRoutes       *sandboxproxy.Registry
+	createSuccesses   atomic.Uint64
+	createFailures    atomic.Uint64
+	rosterMu          sync.Mutex
 }
 
 type sandboxLifecycleLock struct {
@@ -103,9 +112,19 @@ func (s *Service) SetSandboxDefaults(defaults SandboxDefaults) {
 	s.SandboxDefaults = defaults
 }
 
-func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) (SandboxCreateResult, error) {
+func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) (result SandboxCreateResult, err error) {
 	if s == nil || s.Sandbox == nil {
 		return SandboxCreateResult{}, fmt.Errorf("sandbox service is not configured")
+	}
+	defer func() {
+		if err != nil {
+			s.createFailures.Add(1)
+		} else {
+			s.createSuccesses.Add(1)
+		}
+	}()
+	if opts.E2B && (s.Envd == nil || s.ProxyRoutes == nil) {
+		return SandboxCreateResult{}, fmt.Errorf("E2B runtime is not configured")
 	}
 	if err := agentprotocol.ValidateEnvironment(opts.Env); err != nil {
 		return SandboxCreateResult{}, sandbox.ErrInvalidEnvironment.Wrap(err)
@@ -141,6 +160,18 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		return SandboxCreateResult{}, err
 	}
 	templateID := templateSelection.ID
+	if templateSelection.Resume && (opts.E2B || s.Capacity != nil) && templateSelection.CPUCount <= 0 {
+		return SandboxCreateResult{}, sandbox.ErrFailedPrecondition.WrapMessage(nil, "resume template lacks captured CPU metadata; recreate the checkpoint template")
+	}
+	if templateSelection.CPUCount > 0 {
+		opts.VCPUNum = templateSelection.CPUCount
+		if opts.VCPUMax < opts.VCPUNum {
+			opts.VCPUMax = opts.VCPUNum
+		}
+	}
+	if templateSelection.MemorySizeMB > 0 {
+		opts.RamMB = templateSelection.MemorySizeMB
+	}
 	if opts.VCPUNum < 1 || opts.VCPUMax < opts.VCPUNum {
 		return SandboxCreateResult{}, sandbox.ErrInvalidArgument.Wrap(fmt.Errorf("invalid sandbox CPU configuration"))
 	}
@@ -153,12 +184,26 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 	if err := netstack.ValidateSandboxNetworkInputConfig(ctx, opts.Network); err != nil {
 		return SandboxCreateResult{}, err
 	}
+	if err := s.Capacity.reserve(opts.SandboxID, opts.VCPUNum, opts.RamMB); err != nil {
+		return SandboxCreateResult{}, err
+	}
+	keepReservation := false
+	defer func() {
+		if !keepReservation {
+			s.Capacity.release(opts.SandboxID)
+		}
+	}()
 	agentToken, err := sandbox.GenerateAgentToken()
+	if err != nil {
+		return SandboxCreateResult{}, err
+	}
+	runtimeID, err := id.New()
 	if err != nil {
 		return SandboxCreateResult{}, err
 	}
 
 	req := sandbox.CreateRequest{
+		RuntimeID:    runtimeID,
 		TemplateID:   templateID,
 		VMMName:      opts.VMMName,
 		SandboxID:    opts.SandboxID,
@@ -173,6 +218,7 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 
 	createdAt := time.Now().UnixNano()
 	creatingRecord := sandbox.Record{
+		RuntimeID:          runtimeID,
 		ID:                 opts.SandboxID,
 		State:              sandbox.StateCreating,
 		CreatedAt:          createdAt,
@@ -181,9 +227,13 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		VCPUNum:            opts.VCPUNum,
 		RamMB:              opts.RamMB,
 		Network:            opts.Network,
+		E2B:                opts.E2B,
+		Metadata:           copyMap(opts.Metadata),
 	}
 	if s.Store != nil {
+		unlockRoster := s.LockSandboxRoster()
 		creatingRecord, err = s.Store.Create(ctx, creatingRecord)
+		unlockRoster()
 		if err != nil {
 			return SandboxCreateResult{}, fmt.Errorf("persist creating sandbox state: %w", err)
 		}
@@ -193,6 +243,8 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		if s.Store == nil {
 			return nil
 		}
+		unlockRoster := s.LockSandboxRoster()
+		defer unlockRoster()
 		return s.Store.Delete(context.Background(), opts.SandboxID)
 	}
 	createCtx := ctx
@@ -211,17 +263,41 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		}
 	}
 
+	var routeGeneration uint64
+	if opts.E2B {
+		routeGeneration = s.ProxyRoutes.Begin(opts.SandboxID)
+		defer func() {
+			if err != nil {
+				s.ProxyRoutes.Remove(opts.SandboxID, routeGeneration)
+			}
+		}()
+	}
 	createResult, err := s.Sandbox.Create(createCtx, req)
 	if err != nil {
-		if cleanupErr := errors.Join(releaseOperationLease(), deleteCreatingRecord()); cleanupErr != nil {
+		var cleanup *sandbox.CleanupError
+		var recordErr error
+		if errors.As(err, &cleanup) && !cleanup.ResourcesReleased {
+			// Manager may fail conch-init readiness after starting a VMM.
+			// Its partial result owns the same reservation until exit is proven.
+			keepReservation = true
+			creatingRecord.VMMPID = createResult.VMMPID
+			creatingRecord.IP = createResult.IP
+			creatingRecord.CheckpointHeadTemplateID = createResult.BootIndexDigest
+			creatingRecord.RuntimeSnapshots = append([]sandbox.SnapshotRef(nil), createResult.RuntimeSnapshots...)
+			recordErr = s.retainPendingCleanup(creatingRecord, err)
+		} else {
+			recordErr = deleteCreatingRecord()
+		}
+		if cleanupErr := errors.Join(releaseOperationLease(), recordErr); cleanupErr != nil {
 			ulog.GetLogger().Warn("failed to clean up sandbox create operation",
 				ulog.F("sandbox_id", opts.SandboxID),
 				ulog.F("error", cleanupErr),
 			)
 		}
-		return SandboxCreateResult{}, translateSandboxError(err)
+		return SandboxCreateResult{}, translateSandboxError(errors.Join(err, recordErr))
 	}
 	rec := sandbox.Record{
+		RuntimeID:                runtimeID,
 		ID:                       opts.SandboxID,
 		VMMPID:                   createResult.VMMPID,
 		State:                    sandbox.StateReady,
@@ -234,16 +310,72 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		RamMB:                    opts.RamMB,
 		Network:                  opts.Network,
 		RuntimeSnapshots:         append([]sandbox.SnapshotRef(nil), createResult.RuntimeSnapshots...),
+		E2B:                      opts.E2B,
+		Metadata:                 copyMap(opts.Metadata),
+	}
+	if opts.E2B {
+		generationCtx, current := s.ProxyRoutes.GenerationContext(opts.SandboxID, routeGeneration)
+		if !current {
+			generationCtx = ctx
+		}
+		// Keep the remaining creation deadline and synchronous generation
+		// cancellation; envd initialization has no separate timeout budget.
+		var initCtx context.Context
+		var cancel context.CancelFunc
+		if deadline, ok := ctx.Deadline(); ok {
+			initCtx, cancel = context.WithDeadline(generationCtx, deadline)
+		} else {
+			initCtx, cancel = context.WithCancel(generationCtx)
+		}
+		stop := context.AfterFunc(ctx, cancel)
+		if !current || ctx.Err() != nil {
+			cancel()
+		}
+		err = s.Envd.WaitReady(initCtx, createResult.IP)
+		if err == nil {
+			err = s.Envd.Init(initCtx, createResult.IP, envd.InitOptions{
+				EnvVars: copyMap(opts.Env), DefaultUser: "user", DefaultWorkdir: "/home/user",
+			})
+		}
+		if err == nil {
+			rec.EnvdVersion, err = s.Envd.Version(initCtx, createResult.IP, createResult.AgentToken)
+		}
+		cancel()
+		stop()
+		if err != nil {
+			s.ProxyRoutes.Remove(opts.SandboxID, routeGeneration)
+			cleanupErr := s.Sandbox.Delete(sandbox.DeleteRequest{SandboxID: opts.SandboxID})
+			keepReservation = !cleanupResourcesReleased(cleanupErr)
+			var recordErr error
+			if keepReservation {
+				recordErr = s.retainPendingCleanup(rec, cleanupErr)
+			} else {
+				recordErr = deleteCreatingRecord()
+			}
+			return SandboxCreateResult{}, combineOperationErrors(fmt.Errorf("initialize envd: %w", err), errors.Join(cleanupErr, releaseOperationLease(), recordErr))
+		}
+		// The upstream treats a zero TTL as an immediately due deadline.
+		rec.ExpiresAt = time.Now().Add(opts.Timeout).UnixNano()
 	}
 	if s.Store != nil {
 		_, err = s.Store.Update(ctx, rec)
 	}
 	if err != nil {
+		if opts.E2B {
+			s.ProxyRoutes.Remove(opts.SandboxID, routeGeneration)
+		}
 		cleanupErr := s.Sandbox.Delete(sandbox.DeleteRequest{SandboxID: opts.SandboxID})
 		if errors.Is(cleanupErr, sandbox.ErrNotFound) {
 			cleanupErr = nil
 		}
-		cleanupErr = errors.Join(cleanupErr, releaseOperationLease(), deleteCreatingRecord())
+		keepReservation = !cleanupResourcesReleased(cleanupErr)
+		var recordErr error
+		if keepReservation {
+			recordErr = s.retainPendingCleanup(rec, cleanupErr)
+		} else {
+			recordErr = deleteCreatingRecord()
+		}
+		cleanupErr = errors.Join(cleanupErr, releaseOperationLease(), recordErr)
 		if cleanupErr != nil {
 			ulog.GetLogger().Warn("failed to clean up sandbox after state persistence failure",
 				ulog.F("sandbox_id", opts.SandboxID),
@@ -252,6 +384,21 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		}
 		return SandboxCreateResult{}, fmt.Errorf("persist sandbox state: %w", err)
 	}
+	if opts.E2B {
+		if err := s.ProxyRoutes.Publish(opts.SandboxID, routeGeneration, createResult.IP); err != nil {
+			s.ProxyRoutes.Remove(opts.SandboxID, routeGeneration)
+			cleanupErr := s.Sandbox.Delete(sandbox.DeleteRequest{SandboxID: opts.SandboxID})
+			keepReservation = !cleanupResourcesReleased(cleanupErr)
+			var recordErr error
+			if keepReservation {
+				recordErr = s.retainPendingCleanup(rec, cleanupErr)
+			} else {
+				recordErr = deleteCreatingRecord()
+			}
+			return SandboxCreateResult{}, errors.Join(err, cleanupErr, releaseOperationLease(), recordErr)
+		}
+	}
+	keepReservation = true
 	if err := releaseOperationLease(); err != nil {
 		ulog.GetLogger().Warn("failed to release sandbox operation lease",
 			ulog.F("sandbox_id", opts.SandboxID),
@@ -268,6 +415,7 @@ func (s *Service) CreateSandbox(ctx context.Context, opts SandboxCreateOptions) 
 		VCPUNum:      opts.VCPUNum,
 		RamMB:        opts.RamMB,
 		CreatedAt:    createdAt,
+		EnvdVersion:  rec.EnvdVersion,
 	}, nil
 }
 
@@ -354,8 +502,11 @@ func (s *Service) applySandboxDefaults(opts *SandboxCreateOptions) {
 }
 
 type sandboxTemplateSelection struct {
-	Name string
-	ID   string
+	Name         string
+	ID           string
+	MemorySizeMB int64
+	CPUCount     int64
+	Resume       bool
 }
 
 func (s *Service) resolveSandboxTemplate(ctx context.Context, name, rawID string) (sandboxTemplateSelection, error) {
@@ -374,7 +525,17 @@ func (s *Service) resolveSandboxTemplate(ctx context.Context, name, rawID string
 		if err != nil {
 			return sandboxTemplateSelection{}, err
 		}
-		return sandboxTemplateSelection{Name: entry.Name, ID: entry.BootIndexDigest}, nil
+		selection := sandboxTemplateSelection{Name: entry.Name, ID: entry.BootIndexDigest}
+		if entry.BootMode == conchtemplate.BootModeResume {
+			info, err := conchimage.InspectBootIndex(ctx, s.Containerd, entry.BootIndexDigest)
+			if err != nil {
+				return sandboxTemplateSelection{}, err
+			}
+			selection.MemorySizeMB = info.MemorySizeMB
+			selection.CPUCount = info.CPUCount
+			selection.Resume = true
+		}
+		return selection, nil
 	}
 	parsedID, err := digest.Parse(rawID)
 	if err != nil {
@@ -394,7 +555,7 @@ func (s *Service) resolveSandboxTemplate(ctx context.Context, name, rawID string
 			return sandboxTemplateSelection{}, err
 		}
 	}
-	return sandboxTemplateSelection{ID: info.BootIndexDigest}, nil
+	return sandboxTemplateSelection{ID: info.BootIndexDigest, MemorySizeMB: info.MemorySizeMB, CPUCount: info.CPUCount, Resume: info.Resume}, nil
 }
 
 func (s *Service) RemoveSandbox(ctx context.Context, sandboxID string) error {
@@ -415,6 +576,39 @@ func (s *Service) RemoveSandbox(ctx context.Context, sandboxID string) error {
 			return getErr
 		}
 	}
+	return s.removeSandboxLocked(ctx, sandboxID, rec)
+}
+
+// ReconcileSandbox applies a maintenance observation only to the same runtime
+// and only if it is still eligible. A public ID can be reused after DELETE.
+func (s *Service) ReconcileSandbox(ctx context.Context, sandboxID, runtimeID string, observedAt time.Time) error {
+	if s == nil || s.Sandbox == nil || s.Store == nil {
+		return fmt.Errorf("sandbox service is not configured")
+	}
+	if runtimeID == "" {
+		return nil
+	}
+	unlock := s.lifecycleLocks.lock(sandboxID)
+	defer unlock()
+	rec, err := s.getSandbox(ctx, sandboxID)
+	if errors.Is(err, sandbox.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if rec.RuntimeID != runtimeID {
+		return nil
+	}
+	if !rec.CleanupPending && !(rec.E2B && rec.ExpiresAt > 0 && rec.ExpiresAt <= observedAt.UnixNano()) {
+		return nil
+	}
+	return s.removeSandboxLocked(ctx, sandboxID, rec)
+}
+
+// removeSandboxLocked requires lifecycleLocks for this ID and a current record.
+func (s *Service) removeSandboxLocked(ctx context.Context, sandboxID string, rec sandbox.Record) error {
+	s.removeProxyRoute(sandboxID)
 	cleanupErr := s.Sandbox.Delete(sandbox.DeleteRequest{SandboxID: sandboxID})
 	if errors.Is(cleanupErr, sandbox.ErrNotFound) {
 		cleanupErr = nil
@@ -422,9 +616,17 @@ func (s *Service) RemoveSandbox(ctx context.Context, sandboxID string) error {
 	if errors.Is(cleanupErr, sandbox.ErrFailedPrecondition) {
 		return cleanupErr
 	}
+	if !cleanupResourcesReleased(cleanupErr) {
+		// Do not erase the only owner of a reservation whose release has not
+		// been confirmed. E2B delete or the maintenance worker can retry it.
+		return errors.Join(cleanupErr, s.retainPendingCleanup(rec, cleanupErr))
+	}
+	s.Capacity.release(sandboxID)
 	var deleteErr error
 	if s.Store != nil {
+		unlockRoster := s.LockSandboxRoster()
 		deleteErr = s.Store.Delete(ctx, sandboxID)
+		unlockRoster()
 	}
 	if deleteErr == nil && rec.ID != "" {
 		s.publishLifecycleEvent(webhook.EventSandboxKilled, rec, "request")
@@ -434,7 +636,7 @@ func (s *Service) RemoveSandbox(ctx context.Context, sandboxID string) error {
 
 // HandleSandboxUnexpectedExit records the loss of a sandbox and emits its lifecycle event.
 // It is called by sandbox.Manager after the runtime resources have been cleaned up.
-func (s *Service) HandleSandboxUnexpectedExit(sandboxID string, cleanupErr error) {
+func (s *Service) HandleSandboxUnexpectedExit(sandboxID, runtimeID string, cleanupErr error) {
 	if s == nil || s.Store == nil {
 		return
 	}
@@ -448,10 +650,23 @@ func (s *Service) HandleSandboxUnexpectedExit(sandboxID string, cleanupErr error
 		ulog.GetLogger().Error("failed to read sandbox after unexpected exit", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
 		return
 	}
-	if rec.State == sandbox.StateUnknown {
+	// Manager may already have removed the old entry when this callback
+	// acquires lifecycleLocks. Native clients can reuse the public ID after
+	// deletion, so only the matching runtime may retire its current resources.
+	if runtimeID == "" || rec.RuntimeID != runtimeID {
+		return
+	}
+	s.removeProxyRoute(sandboxID)
+	if cleanupResourcesReleased(cleanupErr) {
+		s.Capacity.release(sandboxID)
+	}
+	wasUnknown := rec.State == sandbox.StateUnknown
+	if wasUnknown && (rec.ResourcesReleased || !cleanupResourcesReleased(cleanupErr)) {
 		return
 	}
 	rec.State = sandbox.StateUnknown
+	rec.ResourcesReleased = cleanupResourcesReleased(cleanupErr)
+	rec.CleanupPending = rec.CleanupPending || !rec.ResourcesReleased
 	if cleanupErr != nil {
 		rec.LastError = cleanupErr.Error()
 	}
@@ -459,7 +674,72 @@ func (s *Service) HandleSandboxUnexpectedExit(sandboxID string, cleanupErr error
 		ulog.GetLogger().Error("failed to persist sandbox after unexpected exit", ulog.F("sandbox_id", sandboxID), ulog.F("error", err))
 		return
 	}
-	s.publishLifecycleEvent(webhook.EventSandboxKilled, rec, "orphaned")
+	if !wasUnknown {
+		s.publishLifecycleEvent(webhook.EventSandboxKilled, rec, "orphaned")
+	}
+}
+
+func (s *Service) removeProxyRoute(sandboxID string) {
+	if s.ProxyRoutes != nil {
+		if generation, ok := s.ProxyRoutes.CurrentGeneration(sandboxID); ok {
+			s.ProxyRoutes.Remove(sandboxID, generation)
+		}
+	}
+}
+
+func cleanupResourcesReleased(err error) bool {
+	if err == nil || errors.Is(err, sandbox.ErrNotFound) {
+		return true
+	}
+	var cleanup *sandbox.CleanupError
+	return errors.As(err, &cleanup) && cleanup.ResourcesReleased
+}
+
+// retainPendingCleanup keeps accountable state after an incomplete teardown.
+// A cleanup diagnostic alone must not orphan a capacity reservation.
+func (s *Service) retainPendingCleanup(rec sandbox.Record, cleanupErr error) error {
+	if s.Store == nil || rec.ID == "" {
+		return nil
+	}
+	rec.State = sandbox.StateUnknown
+	rec.CleanupPending = true
+	rec.ResourcesReleased = false
+	if rec.CheckpointHeadTemplateID == "" {
+		rec.CheckpointHeadTemplateID = rec.SourceTemplateID
+	}
+	if cleanupErr != nil {
+		rec.LastError = cleanupErr.Error()
+	}
+	_, err := s.Store.Update(context.Background(), rec)
+	return err
+}
+
+// HandleSandboxRuntimeExiting runs while the Manager still owns its current
+// runtime entry, before its interaction IP can return to the network pool.
+// Do not take lifecycleLocks here: Manager holds its own per-sandbox lock.
+func (s *Service) HandleSandboxRuntimeExiting(sandboxID string) {
+	s.removeProxyRoute(sandboxID)
+}
+
+// LockSandboxRoster serializes membership changes with the complete heartbeat
+// RPC. A roster captured before Create cannot arrive after its assignment and
+// delete that new binding in AgentENV's authoritative reconciliation.
+func (s *Service) LockSandboxRoster() func() {
+	s.rosterMu.Lock()
+	return s.rosterMu.Unlock
+}
+
+// CreateCounts reports cumulative Node lifecycle outcomes to the Scheduler.
+func (s *Service) CreateCounts() (uint64, uint64) {
+	return s.createSuccesses.Load(), s.createFailures.Load()
+}
+
+func (s *Service) GetSandbox(ctx context.Context, sandboxID string) (sandbox.Record, error) {
+	return s.getSandbox(ctx, sandboxID)
+}
+
+func (s *Service) ListSandboxes(ctx context.Context) ([]sandbox.Record, error) {
+	return s.Store.List(ctx, sandbox.Filter{})
 }
 
 func (s *Service) publishLifecycleEvent(eventType string, rec sandbox.Record, killReason string) {
@@ -594,6 +874,7 @@ func (s *Service) CheckpointSandbox(ctx context.Context, opts SandboxCheckpointO
 		MemRoot:               captured.MemRootPath,
 		VMMName:               captured.VMMName,
 		MemorySizeMB:          captured.MemorySizeMB,
+		CPUCount:              rec.VCPUNum,
 	})
 	if err != nil {
 		return SandboxCheckpointResult{}, err

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -141,6 +142,7 @@ func mountPmemDevices() string {
 		ulog.GetLogger().Warn("No pmem devices found")
 		return ""
 	}
+	entries = orderedPmemDevices(entries)
 
 	var lowerDirs []string
 	logger := ulog.GetLogger()
@@ -167,6 +169,34 @@ func mountPmemDevices() string {
 	}
 
 	return strings.Join(lowerDirs, ":")
+}
+
+// orderedPmemDevices preserves VMM device order beyond nine layers. Glob's
+// lexical order places pmem10 before pmem2 and changes overlay precedence.
+// Partition nodes are not rootfs layers and are excluded.
+func orderedPmemDevices(entries []string) []string {
+	type device struct {
+		name  string
+		index uint64
+	}
+	devices := make([]device, 0, len(entries))
+	for _, name := range entries {
+		suffix, ok := strings.CutPrefix(filepath.Base(name), "pmem")
+		if !ok || suffix == "" {
+			continue
+		}
+		index, err := strconv.ParseUint(suffix, 10, 64)
+		if err != nil {
+			continue
+		}
+		devices = append(devices, device{name, index})
+	}
+	sort.Slice(devices, func(i, j int) bool { return devices[i].index < devices[j].index })
+	result := make([]string, 0, len(devices))
+	for _, device := range devices {
+		result = append(result, device.name)
+	}
+	return result
 }
 
 // mountOverlayFS mounts the OverlayFS merge layer

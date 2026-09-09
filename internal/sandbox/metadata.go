@@ -20,6 +20,7 @@ type SnapshotRef = snapshot.RuntimeSnapshotRef
 
 type Record struct {
 	ID                       string
+	RuntimeID                string
 	VMMPID                   int
 	State                    State
 	CreatedAt                int64
@@ -32,6 +33,12 @@ type Record struct {
 	Network                  *runtimeapi.SandboxNetworkConfig
 	LastError                string
 	RuntimeSnapshots         []SnapshotRef
+	E2B                      bool
+	EnvdVersion              string
+	Metadata                 map[string]string
+	ExpiresAt                int64
+	ResourcesReleased        bool
+	CleanupPending           bool
 }
 
 type Filter struct {

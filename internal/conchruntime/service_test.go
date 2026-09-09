@@ -152,7 +152,7 @@ func TestSandboxLifecycleEventsPublishedAfterCreateAndDelete(t *testing.T) {
 func TestHandleSandboxUnexpectedExitMarksUnknownAndPublishesOnce(t *testing.T) {
 	store := newTestStore(t)
 	templateID := digest.FromString("orphaned-event-template").String()
-	record := sandbox.Record{ID: "sandbox-orphaned", State: sandbox.StateReady, CreatedAt: time.Now().UnixNano(), CheckpointHeadTemplateID: templateID, VCPUNum: 2, RamMB: 512}
+	record := sandbox.Record{ID: "sandbox-orphaned", RuntimeID: "runtime-original", State: sandbox.StateReady, CreatedAt: time.Now().UnixNano(), CheckpointHeadTemplateID: templateID, VCPUNum: 2, RamMB: 512}
 	if err := store.Put(context.Background(), record); err != nil {
 		t.Fatalf("seed sandbox: %v", err)
 	}
@@ -170,8 +170,8 @@ func TestHandleSandboxUnexpectedExitMarksUnknownAndPublishesOnce(t *testing.T) {
 	}
 	svc := New(nil, nil, store)
 	svc.WebhookDispatcher = dispatcher
-	svc.HandleSandboxUnexpectedExit(record.ID, nil)
-	svc.HandleSandboxUnexpectedExit(record.ID, nil)
+	svc.HandleSandboxUnexpectedExit(record.ID, record.RuntimeID, nil)
+	svc.HandleSandboxUnexpectedExit(record.ID, record.RuntimeID, nil)
 	select {
 	case event := <-events:
 		if event.Type != webhook.EventSandboxKilled || event.EventData.KillReason != "orphaned" || event.SandboxID != record.ID {
@@ -191,6 +191,9 @@ func TestHandleSandboxUnexpectedExitMarksUnknownAndPublishesOnce(t *testing.T) {
 	}
 	if updated.State != sandbox.StateUnknown {
 		t.Fatalf("state = %q, want %q", updated.State, sandbox.StateUnknown)
+	}
+	if !updated.ResourcesReleased {
+		t.Fatal("successful cleanup retained allocated resources in the heartbeat record")
 	}
 }
 
@@ -328,6 +331,7 @@ func TestCheckpointSandboxPublishesCaptureAndAtomicallyAdvancesHead(t *testing.T
 
 	before := sandbox.Record{
 		ID:                       "sandbox-a",
+		VCPUNum:                  2,
 		State:                    sandbox.StateReady,
 		CheckpointHeadTemplateID: t0Digest,
 	}
@@ -450,6 +454,7 @@ func TestCheckpointSandboxDoesNotPublishTemplateWhenSandboxUpdateFails(t *testin
 	store := newTestStore(t)
 	if err := store.Put(ctx, sandbox.Record{
 		ID:                       "sandbox-cas",
+		VCPUNum:                  2,
 		State:                    sandbox.StateReady,
 		CheckpointHeadTemplateID: sourceDigest,
 	}); err != nil {
@@ -484,6 +489,7 @@ func TestCheckpointSandboxKeepsPreviousHeadLeasedUntilTemplatePutCompletes(t *te
 	store := host.SandboxStore()
 	record := sandbox.Record{
 		ID:                       "sandbox-rollback",
+		VCPUNum:                  2,
 		State:                    sandbox.StateReady,
 		CheckpointHeadTemplateID: sourceDigest,
 	}
@@ -556,6 +562,7 @@ func TestCheckpointSandboxBuildsConsecutiveTemplateLineage(t *testing.T) {
 	seedTemplate(t, ctx, host, sourceName, t0Digest, conchtemplate.BootModeCold)
 	if err := store.Put(ctx, sandbox.Record{
 		ID:                       "sandbox-lineage",
+		VCPUNum:                  2,
 		State:                    sandbox.StateReady,
 		CheckpointHeadTemplateID: t0Digest,
 	}); err != nil {
@@ -615,7 +622,7 @@ func TestCheckpointSandboxBuildsConsecutiveTemplateLineage(t *testing.T) {
 	}
 }
 
-func TestRemoveSandboxDeletesRecordWhenCleanupFails(t *testing.T) {
+func TestRemoveSandboxRetainsOwnershipUntilCleanupIsConfirmed(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
 	events := make(chan webhook.Event, 1)
@@ -646,11 +653,35 @@ func TestRemoveSandboxDeletesRecordWhenCleanupFails(t *testing.T) {
 	sandboxOps := &fakeSandboxOps{deleteErr: wantErr}
 	svc := New(sandboxOps, nil, store)
 	svc.WebhookDispatcher = dispatcher
+	var capacityErr error
+	svc.Capacity, capacityErr = NewCapacity(CapacityLimits{MaxSandboxes: 1, MaxCPUs: 2, MaxMemoryMB: 512})
+	if capacityErr != nil {
+		t.Fatal(capacityErr)
+	}
+	if err := svc.Capacity.reserve(record.ID, 2, 512); err != nil {
+		t.Fatal(err)
+	}
 	if err := svc.RemoveSandbox(ctx, record.ID); !errors.Is(err, wantErr) {
 		t.Fatalf("RemoveSandbox() error = %v, want %v", err, wantErr)
 	}
+	pending, err := store.Get(ctx, record.ID)
+	if err != nil || !pending.CleanupPending || pending.ResourcesReleased || pending.State != sandbox.StateUnknown {
+		t.Fatalf("cleanup owner lost: %+v %v", pending, err)
+	}
+	if err := svc.Capacity.reserve("other", 2, 512); !errors.Is(err, sandbox.ErrResourceExhausted) {
+		t.Fatalf("unconfirmed cleanup released capacity: %v", err)
+	}
+	// An API diagnostic is still returned, but confirmed VM release must not
+	// strand an admission reservation or the persistent ownership record.
+	sandboxOps.deleteErr = &sandbox.CleanupError{Err: wantErr, ResourcesReleased: true}
+	if err := svc.RemoveSandbox(ctx, record.ID); !errors.Is(err, wantErr) {
+		t.Fatalf("cleanup diagnostic lost: %v", err)
+	}
 	if _, err := store.Get(ctx, record.ID); !errors.Is(err, sandbox.ErrNotFound) {
 		t.Fatalf("GetSandbox() error = %v, want ErrNotFound", err)
+	}
+	if err := svc.Capacity.reserve("other", 2, 512); err != nil {
+		t.Fatalf("confirmed cleanup stranded capacity: %v", err)
 	}
 	select {
 	case event := <-events:
@@ -792,6 +823,7 @@ func TestCreateSandboxStoresAPIAndCheckpointMetadata(t *testing.T) {
 	}
 	want := sandbox.Record{
 		ID:                       "sandbox-1",
+		RuntimeID:                sandboxOps.req.RuntimeID,
 		State:                    sandbox.StateReady,
 		CreatedAt:                result.CreatedAt,
 		SourceTemplateName:       testTemplateName,
@@ -803,6 +835,9 @@ func TestCreateSandboxStoresAPIAndCheckpointMetadata(t *testing.T) {
 	}
 	if !reflect.DeepEqual(rec, want) {
 		t.Fatalf("sandbox record = %#v, want %#v", rec, want)
+	}
+	if rec.RuntimeID == "" {
+		t.Fatal("runtime identity was not persisted")
 	}
 }
 
@@ -828,7 +863,7 @@ func TestCreateSandboxReadyStateFailureDeletesCreatingRecordWhenRuntimeAlreadyEx
 	}
 }
 
-func TestCreateSandboxReadyStateFailureDeletesCreatingRecordWhenRuntimeCleanupFails(t *testing.T) {
+func TestCreateSandboxReadyStateFailureRetainsUnconfirmedCleanup(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
 	sandboxOps := &fakeSandboxOps{deleteErr: errors.New("VMM process exit could not be confirmed")}
@@ -844,8 +879,9 @@ func TestCreateSandboxReadyStateFailureDeletesCreatingRecordWhenRuntimeCleanupFa
 	}); err == nil {
 		t.Fatal("CreateSandbox() error = nil, want READY state persistence failure")
 	}
-	if _, err := store.Get(ctx, "sandbox-1"); !errors.Is(err, sandbox.ErrNotFound) {
-		t.Fatalf("GetSandbox() error = %v, want ErrNotFound", err)
+	record, err := store.Get(ctx, "sandbox-1")
+	if err != nil || record.State != sandbox.StateUnknown || !record.CleanupPending || record.ResourcesReleased {
+		t.Fatalf("unconfirmed cleanup owner = %+v, err=%v", record, err)
 	}
 }
 
@@ -1285,8 +1321,8 @@ func TestCreateSandboxKeepsExplicitOptions(t *testing.T) {
 	sandboxOps := &fakeSandboxOps{}
 	svc := New(sandboxOps, nil, nil)
 	defaultDigest := digest.FromString("default-template").String()
-	explicitDigest := digest.FromString("resume-template").String()
-	const explicitName = "registry.example/conch/resume:latest"
+	explicitDigest := digest.FromString("explicit-template").String()
+	const explicitName = "registry.example/conch/explicit:latest"
 	svc.SetSandboxDefaults(SandboxDefaults{
 		TemplateID: defaultDigest,
 		VMMName:    "default-vmm",
@@ -1295,7 +1331,7 @@ func TestCreateSandboxKeepsExplicitOptions(t *testing.T) {
 		RamMB:      4096,
 	})
 	svc.Templates = &fakeTemplateStore{entries: map[string]conchtemplate.Entry{
-		explicitName: {Name: explicitName, Origin: conchtemplate.OriginCheckpoint, BootMode: conchtemplate.BootModeResume, BootIndexDigest: explicitDigest},
+		explicitName: {Name: explicitName, Origin: conchtemplate.OriginImage, BootMode: conchtemplate.BootModeCold, BootIndexDigest: explicitDigest},
 	}}
 
 	_, err := svc.CreateSandbox(context.Background(), SandboxCreateOptions{

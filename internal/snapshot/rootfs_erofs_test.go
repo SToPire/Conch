@@ -77,9 +77,9 @@ func TestPmemFilesFromErofsMountsUsesErofsSources(t *testing.T) {
 		t.Fatalf("pmemFilesFromErofsMounts: %v", err)
 	}
 	want := []string{
-		"/var/lib/containerd/erofs/layer0.erofs",
-		"/var/lib/containerd/erofs/layer1.erofs",
 		"/var/lib/containerd/erofs/layer2.erofs",
+		"/var/lib/containerd/erofs/layer1.erofs",
+		"/var/lib/containerd/erofs/layer0.erofs",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("files = %#v, want %#v", got, want)

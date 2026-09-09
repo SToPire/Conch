@@ -79,7 +79,7 @@ func RestoreSandbox(
 
 	cleanup := NewCleanup()
 	defer func() {
-		if e != nil {
+		if e != nil && s == nil {
 			cleanupErr := cleanup.Run(context.WithoutCancel(ctx))
 			e = errors.Join(e, cleanupErr)
 		}
@@ -125,11 +125,6 @@ func RestoreSandbox(
 		return nil, fmt.Errorf("failed to init VMM: %w", vmmErr)
 	}
 
-	err = vmmHandle.Restore(ctx, vmStartSpec.SnapfilePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to restore VMM: %w", err)
-	}
-
 	sbx := &Sandbox{
 		vmStartSpec: vmStartSpec,
 		process:     vmmHandle,
@@ -151,6 +146,12 @@ func RestoreSandbox(
 		// Stop the sandbox first if it is still running, otherwise do nothing
 		return sbx.Stop(ctx)
 	})
+	// Once a Process exists, Manager owns cleanup even if launch fails. Return
+	// the runtime so it can revoke routing before releasing the network slot
+	// and retain ownership if process termination could not be confirmed.
+	if err = vmmHandle.Restore(ctx, vmStartSpec.SnapfilePath); err != nil {
+		return sbx, fmt.Errorf("failed to restore VMM: %w", err)
+	}
 
 	return sbx, nil
 }
@@ -169,7 +170,7 @@ func CreateSandbox(
 
 	cleanup := NewCleanup()
 	defer func() {
-		if e != nil {
+		if e != nil && s == nil {
 			cleanupErr := cleanup.Run(context.WithoutCancel(ctx))
 			e = errors.Join(e, cleanupErr)
 		}
@@ -215,11 +216,6 @@ func CreateSandbox(
 		return nil, fmt.Errorf("failed to init VMM: %w", vmmErr)
 	}
 
-	err = vmmHandle.Create(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create VMM: %w", err)
-	}
-
 	sbx := &Sandbox{
 		vmStartSpec: vmStartSpec,
 		process:     vmmHandle,
@@ -241,6 +237,11 @@ func CreateSandbox(
 		// Stop the sandbox first if it is still running, otherwise do nothing
 		return sbx.Stop(ctx)
 	})
+	// Preserve the runtime object on launch failure for Manager's owned
+	// teardown and process-exit confirmation, just as on vsock-ready failure.
+	if err = vmmHandle.Create(ctx); err != nil {
+		return sbx, fmt.Errorf("failed to create VMM: %w", err)
+	}
 
 	return sbx, nil
 }
@@ -264,6 +265,23 @@ func (s *Sandbox) Close(ctx context.Context) error {
 		return fmt.Errorf("failed to cleanup sandbox: %w", err)
 	}
 	return nil
+}
+
+// ComputeResourcesReleased reports confirmed CPU and guest-RAM release. An
+// API delete error does not imply a live VMM: Process.Stop can retain that
+// diagnostic after its process reaper has confirmed exit. Conversely, a cleanup
+// result by itself never proves termination. Call after runtime cleanup while
+// the Manager holds this runtime's lifecycle entry lock.
+func (s *Sandbox) ComputeResourcesReleased() bool {
+	if s == nil || s.process == nil || s.process.Pid() == 0 {
+		return true
+	}
+	select {
+	case <-s.process.Done():
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Sandbox) Pause(ctx context.Context) error {

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/containerd/containerd/v2/core/mount"
@@ -44,6 +45,10 @@ func pmemFilesFromErofsMounts(mounts []mount.Mount) ([]string, error) {
 	if len(files) == 0 {
 		return nil, fmt.Errorf("erofs rootfs mounts contain no pmem files")
 	}
+	// containerd returns overlay parents from newest to base. conch-init
+	// receives devices in base-to-newest order and prepends them to lowerdir,
+	// where the leftmost (newest) layer must win for files such as /etc/passwd.
+	slices.Reverse(files)
 	return files, nil
 }
 
