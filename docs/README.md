@@ -8,6 +8,7 @@
 - [Template 与镜像](user/template.md)：使用 CLI 创建、发布和管理 Template 与镜像。
 - [Python SDK](user/python-sdk.md)：使用 Python 创建和操作 Sandbox。
 - [AgentENV 集群接入](user/agentenv.md)：部署原版 Gateway/Scheduler，用官方 E2B SDK 操作两个 Conch Node。
+- [AgentENV 单机启动](user/agentenv-single-node.md)：在一台机器运行 Conch、Gateway 和 Scheduler，验证完整 SDK 链路。
 - [VSOCK 通信](user/vsock.md)：从 guest 连接 StratoVirt host 上的 VSOCK 服务。
 - [安全说明](user/security.md)：安全模型、信任边界、部署加固要求与需要知悉的既有行为。
 
