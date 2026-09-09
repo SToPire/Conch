@@ -1,9 +1,12 @@
-"""Run against the two-node deployment described in docs/user/agentenv.md."""
+"""Run against the two-node deployment described in docs/user/agentenv.md.
+
+Install ``e2b==2.46.4`` and ``e2b-code-interpreter==2.5.0`` before running.
+"""
 
 import os
 import uuid
 
-from e2b import Sandbox, SandboxQuery
+from e2b_code_interpreter import Sandbox, SandboxQuery
 
 
 template = os.environ["E2B_TEMPLATE_ID"]
@@ -35,7 +38,10 @@ try:
         assert result.exit_code == 0 and result.stdout == str(index), result
         box.files.write("/home/user/example.txt", "Conch + AgentENV\n")
         assert box.files.read("/home/user/example.txt") == "Conch + AgentENV\n"
-        print("commands/files/get/list passed", box.sandbox_id, flush=True)
+        box.run_code("x = 1")
+        execution = box.run_code("x += 1; x")
+        assert execution.text == "2", execution
+        print("commands/files/code-interpreter/get/list passed", box.sandbox_id, flush=True)
 finally:
     for box in boxes:
         try:
