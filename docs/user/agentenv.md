@@ -1,6 +1,6 @@
 # 对接 AgentENV Gateway / Scheduler
 
-Conch 可以作为 AgentENV Node，通过原版 Gateway 和 Scheduler 接入官方 E2B SDK。本期支持 create/get/list/delete、commands/files/PTY 与应用端口代理，SDK 必须显式使用 **non-secure**。Conch 保留 `conch-init` 的 guest 初始化与网络配置，随后等待 envd `/health` 和 `/init` 成功才返回创建结果。
+Conch 可以作为 AgentENV Node，通过原版 Gateway 和 Scheduler 接入官方 E2B SDK。本期支持 create/get/list/delete、checkpoint、commands/files/PTY 与应用端口代理，SDK 必须显式使用 **non-secure**。Conch 保留 `conch-init` 的 guest 初始化与网络配置，随后等待 envd `/health` 和 `/init` 成功才返回创建结果。
 
 本文的上游基线为 AgentENV commit `1d742e4e149092be895f2c3cf0a097201229a250`。示例使用 Python `e2b==2.46.4`、JavaScript/TypeScript `e2b@2.46.1`；guest envd 使用仓库 [e2b-rootfs](../../examples/e2b-rootfs/) 固定的 infra `2026.22` 版本。
 
@@ -168,12 +168,30 @@ node examples/agentenv/integration-smoke.mjs
 
 ## 6. 当前范围
 
+支持 `POST /sandboxes/{id}/snapshots`，对应 Python SDK 的 `sandbox.create_snapshot(name=...)`。它复用 Conch 原生 checkpoint，短暂暂停并捕获状态后继续运行源沙箱，将结果保存为所在 Node 的可恢复模板，成功返回 HTTP `201`：
+
+```json
+{"snapshotID":"ready:v1","names":["ready:v1"]}
+```
+
+`name` 映射为 Conch 的 `template_name`，`snapshotID` 返回这个名称，底层 Boot Index digest 不作为该接口的返回 ID。同名再次 checkpoint 更新同一模板指向的内容，返回的 `snapshotID` 不变。名称中的 tag 只是 Conch 名称的一部分，不增加 E2B 的 namespace/build 管理；名称不能是有效的内容 digest。
+
+未传 `name` 时自动生成唯一的 `checkpoint-<uuid>` 模板名称，返回该名称作为 `snapshotID`，`names` 为 `[]`。源沙箱删除后模板仍保留。模板名称与内容只在源 Node 可见，不自动分发到其他 Node；不能假设经 Gateway 随机调度到的其他 Node 已有该模板。
+
+checkpoint 的总请求时限复用 `sandbox.request_timeout`；SDK 和 Gateway 的请求超时也需覆盖捕获、打包耗时。挂载 virtiofs volume 的沙箱仍遵循原生 checkpoint 的不支持限制。以下示例验证指定名称、同名更新、自动命名以及捕获后源沙箱继续可用；它会删除测试沙箱，保留生成的模板，并打印模板名称和源沙箱 ID：
+
+```bash
+.venv-agentenv/bin/python examples/agentenv/checkpoint-sdk.py
+```
+
+该示例只依赖 `e2b==2.46.4`，沿用前文 SDK 环境变量。可在源 Node 使用 `conch template inspect <snapshotID>` 查看 digest，并用 `conch template rm <snapshotID>` 清理测试模板。E2B 快照列表、删除以及 fork/pause/resume/connect 不包含在这次 checkpoint 接入范围中。
+
 以下能力由 Conch 返回 `501 Not Implemented`，错误体注明 `Unimplemented`：
 
 | 能力 | 接口或触发方式 |
 | --- | --- |
 | 完整 pause/resume/connect | `POST /sandboxes/{id}/pause`、`/resume`、`/connect` |
-| fork、snapshot、timeout 更新和 refresh | `POST /sandboxes/{id}/fork`、`/snapshots`、`/timeout`、`/refreshes` |
+| fork、timeout 更新和 refresh | `POST /sandboxes/{id}/fork`、`/timeout`、`/refreshes` |
 | cold-create、E2B 模板及卷管理 | `/sandboxes-cold`、`/templates...`、`/volumes...` |
 | secure、自动暂停/恢复 | 未显式 `secure=false`，或启用 `autoPause` / `autoResume` |
 | 其他扩展创建参数 | 非空 volumeMounts、MCP、customExtensionParams；私有流量或 maskRequestHost |

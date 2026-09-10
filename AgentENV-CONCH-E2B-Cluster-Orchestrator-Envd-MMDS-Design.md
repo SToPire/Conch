@@ -501,7 +501,8 @@ Scheduler 本身直接复用，不修改代码。Conch 侧需要实现 reporter 
 - `DELETE /sandboxes/{id}`：调用 `RemoveSandbox`，返回 `204`；
 - `POST /sandboxes/{id}/pause`：本期返回 `Unimplemented`，注释说明完整 E2B pause 留待后续实现；
 - `POST /sandboxes/{id}/resume`、`POST /sandboxes/{id}/connect`：本期返回 `Unimplemented`，注释说明恢复/连接语义留待后续实现；
-- `POST /sandboxes/{id}/snapshots` 或 `/fork`：分别映射 checkpoint/fork，未实现时返回稳定 unsupported；
+- `POST /sandboxes/{id}/snapshots`：复用 `conchruntime.Service.CheckpointSandbox`。可选 `name` 映射 `template_name`，未传时自动生成 `checkpoint-<uuid>`；成功返回 `201 {snapshotID: 模板名称, names: [用户指定名称]}`，自动命名时 `names=[]`。同名更新底层 digest，返回名称保持不变。模板保存在源 Node，不自动跨 Node 分发；快照列表、删除不在此范围；
+- `POST /sandboxes/{id}/fork`：本期返回 `Unimplemented`；
 - `ANY /proxy` 和 fallback routing：进入本机 ProxyRegistry，而不是直接暴露 guest `:4064`。
 
 #### conchd orchestrator/runtime
